@@ -5,10 +5,7 @@ use bevy_math::{
     curve::derivatives::SampleDerivative,
 };
 
-use crate::{
-    NoiseFunction,
-    rng::{NoiseRng, RngContext},
-};
+use crate::rng::NoiseRng;
 
 /// Represents a portion or cell of some larger domain and a position within that cell.
 pub trait DomainCell {
@@ -59,7 +56,7 @@ pub trait DiferentiableCell: InterpolatableCell {
                 reason = "It's not redundant. It prevents a move."
             )]
             value: self.interpolate_within(rng, |p| f(p), curve),
-            gradieht: self.interpolation_gradient(rng, f, curve),
+            gradient: self.interpolation_gradient(rng, f, curve),
         }
     }
 }
@@ -70,7 +67,7 @@ pub struct WithGradient<T, G> {
     /// The value.
     pub value: T,
     /// The gradient of the value.
-    pub gradieht: G,
+    pub gradient: G,
 }
 
 /// Represents a point in some domain `T` that is relevant to a particular [`DomainCell`].
@@ -92,32 +89,6 @@ pub trait Partitioner<T: VectorSpace> {
     fn segment(&self, full: T) -> Self::Cell;
 }
 
-/// A [`NoiseFunction`] that takes any [`DomainCell`] and produces a fully random `u32`.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct PerCellRandom;
-
-impl<T: DomainCell> NoiseFunction<T> for PerCellRandom {
-    type Output = u32;
-
-    #[inline]
-    fn evaluate(&self, input: T, seeds: &mut RngContext) -> Self::Output {
-        input.rough_id(seeds.rng())
-    }
-}
-
-/// A [`NoiseFunction`] that takes any [`CellPoint`] and produces a fully random `u32`.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct PerCellPointRandom<N>(pub N);
-
-impl<T, N: NoiseFunction<u32>> NoiseFunction<CellPoint<T>> for PerCellPointRandom<N> {
-    type Output = N::Output;
-
-    #[inline]
-    fn evaluate(&self, input: CellPoint<T>, seeds: &mut RngContext) -> Self::Output {
-        self.0.evaluate(input.rough_id, seeds)
-    }
-}
-
 /// Represents a grid square.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GridSquare<F: VectorSpace, I> {
@@ -136,7 +107,7 @@ impl GridSquare<Vec2, IVec2> {
     fn point_at_offset(&self, rng: NoiseRng, offset: IVec2) -> CellPoint<Vec2> {
         CellPoint {
             rough_id: rng.rand_u32(self.floored + offset),
-            offset: self.offset,
+            offset: self.offset - offset.as_vec2(),
         }
     }
 
@@ -219,7 +190,7 @@ impl GridSquare<Vec3, IVec3> {
     fn point_at_offset(&self, rng: NoiseRng, offset: IVec3) -> CellPoint<Vec3> {
         CellPoint {
             rough_id: rng.rand_u32(self.floored + offset),
-            offset: self.offset,
+            offset: self.offset - offset.as_vec3(),
         }
     }
 
@@ -334,7 +305,7 @@ impl GridSquare<Vec3A, IVec3> {
     fn point_at_offset(&self, rng: NoiseRng, offset: IVec3) -> CellPoint<Vec3A> {
         CellPoint {
             rough_id: rng.rand_u32(self.floored + offset),
-            offset: self.offset,
+            offset: self.offset - offset.as_vec3a(),
         }
     }
 
@@ -449,7 +420,7 @@ impl GridSquare<Vec4, IVec4> {
     fn point_at_offset(&self, rng: NoiseRng, offset: IVec4) -> CellPoint<Vec4> {
         CellPoint {
             rough_id: rng.rand_u32(self.floored + offset),
-            offset: self.offset,
+            offset: self.offset - offset.as_vec4(),
         }
     }
 
