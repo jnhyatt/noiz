@@ -3,6 +3,8 @@
 
 use bevy_math::{IVec2, IVec3, IVec4, UVec2, UVec3, UVec4};
 
+use crate::NoiseFunction;
+
 /// A seeded RNG inspired by [FxHash](https://crates.io/crates/fxhash).
 /// This is similar to a hash function, but does not use std's hash traits, as those produce `u64` outputs only.
 ///
@@ -31,8 +33,31 @@ impl NoiseRng {
     /// Based on `input`, generates a random `f32` in range 0..1 and a byte of remanining entropy from the seed.
     #[inline(always)]
     pub fn rand_unorm_with_entropy(&self, input: impl NoiseRngInput) -> (f32, u8) {
-        let hashed = self.rand_u32(input);
+        Self::any_unorm_with_entropy(self.rand_u32(input))
+    }
 
+    /// Based on `input`, generates a random `f32` in range (-1, 1) and a byte of remanining entropy from the seed.
+    /// Note that the sign of the snorm can be determined by the least bit of the returned `u8`.
+    #[inline(always)]
+    pub fn rand_snorm_with_entropy(&self, input: impl NoiseRngInput) -> (f32, u8) {
+        Self::any_snorm_with_entropy(self.rand_u32(input))
+    }
+
+    /// Based on `input`, generates a random `f32` in range 0..1.
+    #[inline(always)]
+    pub fn rand_unorm(&self, input: impl NoiseRngInput) -> f32 {
+        Self::any_unorm(self.rand_u32(input))
+    }
+
+    /// Based on `input`, generates a random `f32` in range (-1, 1).
+    #[inline(always)]
+    pub fn rand_snorm(&self, input: impl NoiseRngInput) -> f32 {
+        Self::any_snorm(self.rand_u32(input))
+    }
+
+    /// Based on `bits`, generates an arbitrary `f32` in range 0..1 and a byte of remanining entropy.
+    #[inline(always)]
+    pub fn any_unorm_with_entropy(bits: u32) -> (f32, u8) {
         // adapted from rand's `StandardUniform`
 
         let fraction_bits = 23;
@@ -41,27 +66,30 @@ impl NoiseRng {
         let scale = 1f32 / ((1u32 << precision) as f32);
 
         // We use a right shift instead of a mask, because the upper bits tend to be more "random" and it has the same performance.
-        let value = hashed >> (float_size - precision);
-        (scale * value as f32, hashed as u8)
+        let value = bits >> (float_size - precision);
+        (scale * value as f32, bits as u8)
     }
 
-    /// Based on `input`, generates a random `f32` in range -1..=1 and a byte of remanining entropy from the seed.
+    /// Based on `bits`, generates an arbitrary`f32` in range (-1, 1) and a byte of remanining entropy.
+    /// Note that the sign of the snorm can be determined by the least bit of the returned `u8`.
     #[inline(always)]
-    pub fn rand_snorm_with_entropy(&self, input: impl NoiseRngInput) -> (f32, u8) {
-        let (unorm, entropy) = self.rand_unorm_with_entropy(input);
-        (unorm_to_snorm(unorm), entropy)
+    pub fn any_snorm_with_entropy(bits: u32) -> (f32, u8) {
+        let (unorm, entropy) = Self::any_unorm_with_entropy(bits);
+        // Use the least bit of entropy as the sign bit
+        let snorm = f32::from_bits(unorm.to_bits() ^ ((entropy as u32) << 31));
+        (snorm, entropy)
     }
 
-    /// Based on `input`, generates a random `f32` in range 0..1.
+    /// Based on `bits`, generates an arbitrary `f32` in range 0..1.
     #[inline(always)]
-    pub fn rand_unorm(&self, input: impl NoiseRngInput) -> f32 {
-        self.rand_unorm_with_entropy(input).0
+    pub fn any_unorm(bits: u32) -> f32 {
+        Self::any_unorm_with_entropy(bits).0
     }
 
-    /// Based on `input`, generates a random `f32` in range -1..=1.
+    /// Based on `bits`, generates an arbitrary `f32` in range (-1, 1).
     #[inline(always)]
-    pub fn rand_snorm(&self, input: impl NoiseRngInput) -> f32 {
-        self.rand_snorm_with_entropy(input).0
+    pub fn any_snorm(bits: u32) -> f32 {
+        Self::any_snorm_with_entropy(bits).0
     }
 }
 
@@ -222,36 +250,39 @@ impl NoiseRngInput for IVec4 {
 /// This stores the seed of the RNG.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RngContext {
-    next_rng: NoiseRng,
+    rng: NoiseRng,
     entropy: u32,
 }
 
 impl RngContext {
     /// Provides the next [`NoiseRng`] to be generated.
     #[inline(always)]
-    pub fn peek_rng(&self) -> NoiseRng {
-        self.next_rng
+    pub fn rng(&self) -> NoiseRng {
+        self.rng
     }
 
-    /// Provides the next [`NoiseRng`] to be generated.
+    /// Changes the rng to use another random seed.
     #[inline(always)]
-    pub fn next_rng(&mut self) -> NoiseRng {
-        let rng = self.next_rng;
-        self.next_rng = NoiseRng(rng.rand_u32(self.entropy));
-        rng
+    pub fn update_seed(&mut self) {
+        self.rng = NoiseRng(self.rng.rand_u32(self.entropy));
     }
 
     /// Creates a different [`RngContext`] that will yield values independent of this one.
     #[inline(always)]
     pub fn branch(&mut self) -> Self {
-        Self::new(self.next_rng().0, self.next_rng().0)
+        let result = Self::new(
+            self.rng().rand_u32(self.entropy),
+            NoiseRng(self.entropy).rand_u32(self.rng.0),
+        );
+        self.update_seed();
+        result
     }
 
     /// Creates a [`RngContext`] with this entropy and seed.
     #[inline(always)]
     pub fn new(seed: u32, entropy: u32) -> Self {
         Self {
-            next_rng: NoiseRng(seed),
+            rng: NoiseRng(seed),
             entropy,
         }
     }
@@ -265,7 +296,46 @@ impl RngContext {
     /// Creates a [`RngContext`] with entropy and seed from these `bits`.
     #[inline(always)]
     pub fn to_bits(self) -> u64 {
-        ((self.next_rng.0 as u64) << 32) | (self.entropy as u64)
+        ((self.rng.0 as u64) << 32) | (self.entropy as u64)
+    }
+}
+
+/// A [`NoiseFunction`] that takes any [`RngNoiseInput`] and produces a fully random `u32`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Random;
+
+impl<T: NoiseRngInput> NoiseFunction<T> for Random {
+    type Output = u32;
+
+    #[inline]
+    fn evaluate(&self, input: T, seeds: &mut RngContext) -> Self::Output {
+        seeds.rng().rand_u32(input)
+    }
+}
+
+/// A [`NoiseFunction`] that takes a `u32` and produces an arbitrary `f32` in range 0..1.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct UValue;
+
+impl NoiseFunction<u32> for UValue {
+    type Output = f32;
+
+    #[inline]
+    fn evaluate(&self, input: u32, _seeds: &mut RngContext) -> Self::Output {
+        NoiseRng::any_unorm(input)
+    }
+}
+
+/// A [`NoiseFunction`] that takes a `u32` and produces an arbitrary `f32` in range (-1, 1).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct IValue;
+
+impl NoiseFunction<u32> for IValue {
+    type Output = f32;
+
+    #[inline]
+    fn evaluate(&self, input: u32, _seeds: &mut RngContext) -> Self::Output {
+        NoiseRng::any_snorm(input)
     }
 }
 

@@ -5,62 +5,117 @@ use bevy_math::{
     curve::derivatives::SampleDerivative,
 };
 
-use crate::rng::NoiseRng;
+use crate::{
+    NoiseFunction,
+    rng::{NoiseRng, RngContext},
+};
 
-/// Represents a portion or segment of some larger domain and a position within that segment.
-pub trait DomainSegment {
+/// Represents a portion or cell of some larger domain and a position within that cell.
+pub trait DomainCell {
     /// The larger/full domain this is a segment of.
     type Full: VectorSpace;
 
     /// Identifies this segment roughly from others per `rng`, roughly meaning the ids are not necessarily unique.
     fn rough_id(&self, rng: NoiseRng) -> u32;
     /// Iterates all the points relevant to this segment.
-    fn iter_points(&self, rng: NoiseRng) -> impl Iterator<Item = SegmentedPoint<Self::Full>>;
+    fn iter_points(&self, rng: NoiseRng) -> impl Iterator<Item = CellPoint<Self::Full>>;
 }
 
-/// Represents a [`DomainSegment`] that can be soothly interpolated within.
-pub trait InterpolatableSegment: DomainSegment {
-    /// Interpolates between the bounding [`SegmentPoint`]s of this [`DomainSegment`] according to some [`Curve`].
+/// Represents a [`DomainCell`] that can be soothly interpolated within.
+pub trait InterpolatableCell: DomainCell {
+    /// Interpolates between the bounding [`CellPoint`]s of this [`DomainCell`] according to some [`Curve`].
     fn interpolate_within<T: VectorSpace>(
         &self,
         rng: NoiseRng,
-        f: impl FnMut(SegmentedPoint<Self::Full>) -> T,
+        f: impl FnMut(CellPoint<Self::Full>) -> T,
         curve: &impl Curve<f32>,
     ) -> T;
 }
 
-/// Represents a [`InterpolatableSegment`] that can be differentiated.
-pub trait DiferentiableSegment: InterpolatableSegment {
+/// Represents a [`InterpolatableCell`] that can be differentiated.
+pub trait DiferentiableCell: InterpolatableCell {
     /// The gradient vector of derivative elements `D`.
     /// This should usuallt be `[D; N]` where `N` is the number of elements.
     type Gradient<D>;
 
-    /// Calculstes the [`Gradient`](DiferentiableSegment::Gradient) vector for the function [`interpolate_within`](InterpolatableSegment::interpolate_within).
+    /// Calculstes the [`Gradient`](DiferentiableCell::Gradient) vector for the function [`interpolate_within`](InterpolatableCell::interpolate_within).
     fn interpolation_gradient<T: VectorSpace>(
         &self,
         rng: NoiseRng,
-        f: impl FnMut(SegmentedPoint<Self::Full>) -> T,
+        f: impl FnMut(CellPoint<Self::Full>) -> T,
         curve: &impl SampleDerivative<f32>,
     ) -> Self::Gradient<T>;
+
+    /// Combines [`interpolate_within`](InterpolatableCell::interpolate_within) and [`interpolation_gradient`](DiferentiableCell::interpolation_gradient).
+    fn interpolate_with_gradient<T: VectorSpace>(
+        &self,
+        rng: NoiseRng,
+        mut f: impl FnMut(CellPoint<Self::Full>) -> T,
+        curve: &impl SampleDerivative<f32>,
+    ) -> WithGradient<T, Self::Gradient<T>> {
+        WithGradient {
+            #[expect(
+                clippy::redundant_closure,
+                reason = "It's not redundant. It prevents a move."
+            )]
+            value: self.interpolate_within(rng, |p| f(p), curve),
+            gradieht: self.interpolation_gradient(rng, f, curve),
+        }
+    }
 }
 
-/// Represents a point in some domain `T` that is relevant to a particular [`DomainSegment`].
+/// A value `T` with its gradieht `G`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SegmentedPoint<T> {
+pub struct WithGradient<T, G> {
+    /// The value.
+    pub value: T,
+    /// The gradient of the value.
+    pub gradieht: G,
+}
+
+/// Represents a point in some domain `T` that is relevant to a particular [`DomainCell`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellPoint<T> {
     /// Identifies this point roughly from others, roughly meaning the ids are not necessarily unique.
-    /// The ids must be determenistaic per point. Ids for the same point must match, even if they are from different [`DomainSegments`].
+    /// The ids must be determenistaic per point. Ids for the same point must match, even if they are from different [`DomainCells`].
     pub rough_id: u32,
     /// Defines the offset of the sample point from this one.
     pub offset: T,
 }
 
-/// Represents a type that can segment some domain `T` into segments.
-pub trait Segmenter<T: VectorSpace> {
-    /// The [`DomainSegment`] this segmenter produces.
-    type Segment: DomainSegment<Full = T>;
+/// Represents a type that can partition some domain `T` into cells.
+pub trait Partitioner<T: VectorSpace> {
+    /// The [`DomainCell`] this segmenter produces.
+    type Cell: DomainCell<Full = T>;
 
     /// Constructs this segment based on its full location.
-    fn segment(&self, full: T) -> Self::Segment;
+    fn segment(&self, full: T) -> Self::Cell;
+}
+
+/// A [`NoiseFunction`] that takes any [`DomainCell`] and produces a fully random `u32`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PerCellRandom;
+
+impl<T: DomainCell> NoiseFunction<T> for PerCellRandom {
+    type Output = u32;
+
+    #[inline]
+    fn evaluate(&self, input: T, seeds: &mut RngContext) -> Self::Output {
+        input.rough_id(seeds.rng())
+    }
+}
+
+/// A [`NoiseFunction`] that takes any [`CellPoint`] and produces a fully random `u32`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PerCellPointRandom<N>(pub N);
+
+impl<T, N: NoiseFunction<u32>> NoiseFunction<CellPoint<T>> for PerCellPointRandom<N> {
+    type Output = N::Output;
+
+    #[inline]
+    fn evaluate(&self, input: CellPoint<T>, seeds: &mut RngContext) -> Self::Output {
+        self.0.evaluate(input.rough_id, seeds)
+    }
 }
 
 /// Represents a grid square.
@@ -72,25 +127,21 @@ pub struct GridSquare<F: VectorSpace, I> {
     pub offset: F,
 }
 
-/// A [`Segmenter`] that produces various [`GridSquare`]s.
+/// A [`Partitioner`] that produces various [`GridSquare`]s.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Grid;
 
 impl GridSquare<Vec2, IVec2> {
     #[inline]
-    fn point_at_offset(&self, rng: NoiseRng, offset: IVec2) -> SegmentedPoint<Vec2> {
-        SegmentedPoint {
+    fn point_at_offset(&self, rng: NoiseRng, offset: IVec2) -> CellPoint<Vec2> {
+        CellPoint {
             rough_id: rng.rand_u32(self.floored + offset),
             offset: self.offset,
         }
     }
 
     #[inline]
-    fn corners_map<T>(
-        &self,
-        rng: NoiseRng,
-        mut f: impl FnMut(SegmentedPoint<Vec2>) -> T,
-    ) -> [T; 4] {
+    fn corners_map<T>(&self, rng: NoiseRng, mut f: impl FnMut(CellPoint<Vec2>) -> T) -> [T; 4] {
         [
             f(self.point_at_offset(rng, IVec2::new(0, 0))),
             f(self.point_at_offset(rng, IVec2::new(0, 1))),
@@ -100,7 +151,7 @@ impl GridSquare<Vec2, IVec2> {
     }
 }
 
-impl DomainSegment for GridSquare<Vec2, IVec2> {
+impl DomainCell for GridSquare<Vec2, IVec2> {
     type Full = Vec2;
 
     #[inline]
@@ -109,17 +160,17 @@ impl DomainSegment for GridSquare<Vec2, IVec2> {
     }
 
     #[inline]
-    fn iter_points(&self, rng: NoiseRng) -> impl Iterator<Item = SegmentedPoint<Self::Full>> {
+    fn iter_points(&self, rng: NoiseRng) -> impl Iterator<Item = CellPoint<Self::Full>> {
         self.corners_map(rng, |p| p).into_iter()
     }
 }
 
-impl InterpolatableSegment for GridSquare<Vec2, IVec2> {
+impl InterpolatableCell for GridSquare<Vec2, IVec2> {
     #[inline]
     fn interpolate_within<T: VectorSpace>(
         &self,
         rng: NoiseRng,
-        f: impl FnMut(SegmentedPoint<Self::Full>) -> T,
+        f: impl FnMut(CellPoint<Self::Full>) -> T,
         curve: &impl Curve<f32>,
     ) -> T {
         // points
@@ -133,14 +184,14 @@ impl InterpolatableSegment for GridSquare<Vec2, IVec2> {
     }
 }
 
-impl DiferentiableSegment for GridSquare<Vec2, IVec2> {
+impl DiferentiableCell for GridSquare<Vec2, IVec2> {
     type Gradient<D> = [D; 2];
 
     #[inline]
     fn interpolation_gradient<T: VectorSpace>(
         &self,
         rng: NoiseRng,
-        f: impl FnMut(SegmentedPoint<Self::Full>) -> T,
+        f: impl FnMut(CellPoint<Self::Full>) -> T,
         curve: &impl SampleDerivative<f32>,
     ) -> Self::Gradient<T> {
         // points
@@ -165,19 +216,15 @@ impl DiferentiableSegment for GridSquare<Vec2, IVec2> {
 
 impl GridSquare<Vec3, IVec3> {
     #[inline]
-    fn point_at_offset(&self, rng: NoiseRng, offset: IVec3) -> SegmentedPoint<Vec3> {
-        SegmentedPoint {
+    fn point_at_offset(&self, rng: NoiseRng, offset: IVec3) -> CellPoint<Vec3> {
+        CellPoint {
             rough_id: rng.rand_u32(self.floored + offset),
             offset: self.offset,
         }
     }
 
     #[inline]
-    fn corners_map<T>(
-        &self,
-        rng: NoiseRng,
-        mut f: impl FnMut(SegmentedPoint<Vec3>) -> T,
-    ) -> [T; 8] {
+    fn corners_map<T>(&self, rng: NoiseRng, mut f: impl FnMut(CellPoint<Vec3>) -> T) -> [T; 8] {
         [
             f(self.point_at_offset(rng, IVec3::new(0, 0, 0))),
             f(self.point_at_offset(rng, IVec3::new(0, 0, 1))),
@@ -191,7 +238,7 @@ impl GridSquare<Vec3, IVec3> {
     }
 }
 
-impl DomainSegment for GridSquare<Vec3, IVec3> {
+impl DomainCell for GridSquare<Vec3, IVec3> {
     type Full = Vec3;
 
     #[inline]
@@ -200,17 +247,17 @@ impl DomainSegment for GridSquare<Vec3, IVec3> {
     }
 
     #[inline]
-    fn iter_points(&self, rng: NoiseRng) -> impl Iterator<Item = SegmentedPoint<Self::Full>> {
+    fn iter_points(&self, rng: NoiseRng) -> impl Iterator<Item = CellPoint<Self::Full>> {
         self.corners_map(rng, |p| p).into_iter()
     }
 }
 
-impl InterpolatableSegment for GridSquare<Vec3, IVec3> {
+impl InterpolatableCell for GridSquare<Vec3, IVec3> {
     #[inline]
     fn interpolate_within<T: VectorSpace>(
         &self,
         rng: NoiseRng,
-        f: impl FnMut(SegmentedPoint<Self::Full>) -> T,
+        f: impl FnMut(CellPoint<Self::Full>) -> T,
         curve: &impl Curve<f32>,
     ) -> T {
         // points
@@ -228,14 +275,14 @@ impl InterpolatableSegment for GridSquare<Vec3, IVec3> {
     }
 }
 
-impl DiferentiableSegment for GridSquare<Vec3, IVec3> {
+impl DiferentiableCell for GridSquare<Vec3, IVec3> {
     type Gradient<D> = [D; 3];
 
     #[inline]
     fn interpolation_gradient<T: VectorSpace>(
         &self,
         rng: NoiseRng,
-        f: impl FnMut(SegmentedPoint<Self::Full>) -> T,
+        f: impl FnMut(CellPoint<Self::Full>) -> T,
         curve: &impl SampleDerivative<f32>,
     ) -> Self::Gradient<T> {
         // points
@@ -284,19 +331,15 @@ impl DiferentiableSegment for GridSquare<Vec3, IVec3> {
 
 impl GridSquare<Vec3A, IVec3> {
     #[inline]
-    fn point_at_offset(&self, rng: NoiseRng, offset: IVec3) -> SegmentedPoint<Vec3A> {
-        SegmentedPoint {
+    fn point_at_offset(&self, rng: NoiseRng, offset: IVec3) -> CellPoint<Vec3A> {
+        CellPoint {
             rough_id: rng.rand_u32(self.floored + offset),
             offset: self.offset,
         }
     }
 
     #[inline]
-    fn corners_map<T>(
-        &self,
-        rng: NoiseRng,
-        mut f: impl FnMut(SegmentedPoint<Vec3A>) -> T,
-    ) -> [T; 8] {
+    fn corners_map<T>(&self, rng: NoiseRng, mut f: impl FnMut(CellPoint<Vec3A>) -> T) -> [T; 8] {
         [
             f(self.point_at_offset(rng, IVec3::new(0, 0, 0))),
             f(self.point_at_offset(rng, IVec3::new(0, 0, 1))),
@@ -310,7 +353,7 @@ impl GridSquare<Vec3A, IVec3> {
     }
 }
 
-impl DomainSegment for GridSquare<Vec3A, IVec3> {
+impl DomainCell for GridSquare<Vec3A, IVec3> {
     type Full = Vec3A;
 
     #[inline]
@@ -319,17 +362,17 @@ impl DomainSegment for GridSquare<Vec3A, IVec3> {
     }
 
     #[inline]
-    fn iter_points(&self, rng: NoiseRng) -> impl Iterator<Item = SegmentedPoint<Self::Full>> {
+    fn iter_points(&self, rng: NoiseRng) -> impl Iterator<Item = CellPoint<Self::Full>> {
         self.corners_map(rng, |p| p).into_iter()
     }
 }
 
-impl InterpolatableSegment for GridSquare<Vec3A, IVec3> {
+impl InterpolatableCell for GridSquare<Vec3A, IVec3> {
     #[inline]
     fn interpolate_within<T: VectorSpace>(
         &self,
         rng: NoiseRng,
-        f: impl FnMut(SegmentedPoint<Self::Full>) -> T,
+        f: impl FnMut(CellPoint<Self::Full>) -> T,
         curve: &impl Curve<f32>,
     ) -> T {
         // points
@@ -347,14 +390,14 @@ impl InterpolatableSegment for GridSquare<Vec3A, IVec3> {
     }
 }
 
-impl DiferentiableSegment for GridSquare<Vec3A, IVec3> {
+impl DiferentiableCell for GridSquare<Vec3A, IVec3> {
     type Gradient<D> = [D; 3];
 
     #[inline]
     fn interpolation_gradient<T: VectorSpace>(
         &self,
         rng: NoiseRng,
-        f: impl FnMut(SegmentedPoint<Self::Full>) -> T,
+        f: impl FnMut(CellPoint<Self::Full>) -> T,
         curve: &impl SampleDerivative<f32>,
     ) -> Self::Gradient<T> {
         // points
@@ -403,19 +446,15 @@ impl DiferentiableSegment for GridSquare<Vec3A, IVec3> {
 
 impl GridSquare<Vec4, IVec4> {
     #[inline]
-    fn point_at_offset(&self, rng: NoiseRng, offset: IVec4) -> SegmentedPoint<Vec4> {
-        SegmentedPoint {
+    fn point_at_offset(&self, rng: NoiseRng, offset: IVec4) -> CellPoint<Vec4> {
+        CellPoint {
             rough_id: rng.rand_u32(self.floored + offset),
             offset: self.offset,
         }
     }
 
     #[inline]
-    fn corners_map<T>(
-        &self,
-        rng: NoiseRng,
-        mut f: impl FnMut(SegmentedPoint<Vec4>) -> T,
-    ) -> [T; 16] {
+    fn corners_map<T>(&self, rng: NoiseRng, mut f: impl FnMut(CellPoint<Vec4>) -> T) -> [T; 16] {
         [
             f(self.point_at_offset(rng, IVec4::new(0, 0, 0, 0))),
             f(self.point_at_offset(rng, IVec4::new(0, 0, 0, 1))),
@@ -437,7 +476,7 @@ impl GridSquare<Vec4, IVec4> {
     }
 }
 
-impl DomainSegment for GridSquare<Vec4, IVec4> {
+impl DomainCell for GridSquare<Vec4, IVec4> {
     type Full = Vec4;
 
     #[inline]
@@ -446,17 +485,17 @@ impl DomainSegment for GridSquare<Vec4, IVec4> {
     }
 
     #[inline]
-    fn iter_points(&self, rng: NoiseRng) -> impl Iterator<Item = SegmentedPoint<Self::Full>> {
+    fn iter_points(&self, rng: NoiseRng) -> impl Iterator<Item = CellPoint<Self::Full>> {
         self.corners_map(rng, |p| p).into_iter()
     }
 }
 
-impl InterpolatableSegment for GridSquare<Vec4, IVec4> {
+impl InterpolatableCell for GridSquare<Vec4, IVec4> {
     #[inline]
     fn interpolate_within<T: VectorSpace>(
         &self,
         rng: NoiseRng,
-        f: impl FnMut(SegmentedPoint<Self::Full>) -> T,
+        f: impl FnMut(CellPoint<Self::Full>) -> T,
         curve: &impl Curve<f32>,
     ) -> T {
         // points
@@ -499,14 +538,14 @@ impl InterpolatableSegment for GridSquare<Vec4, IVec4> {
     }
 }
 
-impl DiferentiableSegment for GridSquare<Vec4, IVec4> {
+impl DiferentiableCell for GridSquare<Vec4, IVec4> {
     type Gradient<D> = [D; 4];
 
     #[inline]
     fn interpolation_gradient<T: VectorSpace>(
         &self,
         rng: NoiseRng,
-        f: impl FnMut(SegmentedPoint<Self::Full>) -> T,
+        f: impl FnMut(CellPoint<Self::Full>) -> T,
         curve: &impl SampleDerivative<f32>,
     ) -> Self::Gradient<T> {
         // points
@@ -611,11 +650,11 @@ impl DiferentiableSegment for GridSquare<Vec4, IVec4> {
     }
 }
 
-impl Segmenter<Vec2> for Grid {
-    type Segment = GridSquare<Vec2, IVec2>;
+impl Partitioner<Vec2> for Grid {
+    type Cell = GridSquare<Vec2, IVec2>;
 
     #[inline]
-    fn segment(&self, full: Vec2) -> Self::Segment {
+    fn segment(&self, full: Vec2) -> Self::Cell {
         let floor = full.floor();
         GridSquare {
             floored: floor.as_ivec2(),
@@ -624,11 +663,11 @@ impl Segmenter<Vec2> for Grid {
     }
 }
 
-impl Segmenter<Vec3> for Grid {
-    type Segment = GridSquare<Vec3, IVec3>;
+impl Partitioner<Vec3> for Grid {
+    type Cell = GridSquare<Vec3, IVec3>;
 
     #[inline]
-    fn segment(&self, full: Vec3) -> Self::Segment {
+    fn segment(&self, full: Vec3) -> Self::Cell {
         let floor = full.floor();
         GridSquare {
             floored: floor.as_ivec3(),
@@ -637,11 +676,11 @@ impl Segmenter<Vec3> for Grid {
     }
 }
 
-impl Segmenter<Vec3A> for Grid {
-    type Segment = GridSquare<Vec3A, IVec3>;
+impl Partitioner<Vec3A> for Grid {
+    type Cell = GridSquare<Vec3A, IVec3>;
 
     #[inline]
-    fn segment(&self, full: Vec3A) -> Self::Segment {
+    fn segment(&self, full: Vec3A) -> Self::Cell {
         let floor = full.floor();
         GridSquare {
             floored: floor.as_ivec3(),
@@ -650,11 +689,11 @@ impl Segmenter<Vec3A> for Grid {
     }
 }
 
-impl Segmenter<Vec4> for Grid {
-    type Segment = GridSquare<Vec4, IVec4>;
+impl Partitioner<Vec4> for Grid {
+    type Cell = GridSquare<Vec4, IVec4>;
 
     #[inline]
-    fn segment(&self, full: Vec4) -> Self::Segment {
+    fn segment(&self, full: Vec4) -> Self::Cell {
         let floor = full.floor();
         GridSquare {
             floored: floor.as_ivec4(),
