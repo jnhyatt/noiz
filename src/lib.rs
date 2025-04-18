@@ -325,6 +325,16 @@ impl<N: Default> Default for Noise<N> {
     }
 }
 
+impl<N> From<N> for Noise<N> {
+    fn from(value: N) -> Self {
+        Self {
+            noise: value,
+            seed: RngContext::from_bits(0),
+            frequency: 1.0,
+        }
+    }
+}
+
 impl<N> ConfigurableNoise for Noise<N> {
     fn set_seed(&mut self, seed: u64) {
         self.seed = RngContext::from_bits(seed);
@@ -413,13 +423,17 @@ impl<I: VectorSpace, N: NoiseFunction<I>, A> Sampleable<I> for AdaptiveNoise<N, 
     }
 }
 
-impl<T, I: VectorSpace, N: NoiseFunction<I, Output: Into<T>>, A: NoiseFunction<T, Output = T>>
-    SampleableFor<I, T> for AdaptiveNoise<N, A>
+impl<
+    T,
+    I: VectorSpace,
+    N: NoiseFunction<I, Output: NoiseResultOf<T>>,
+    A: NoiseFunction<T, Output = T>,
+> SampleableFor<I, T> for AdaptiveNoise<N, A>
 {
     #[inline]
     fn sample(&self, loc: I) -> T {
         let (result, mut rng) = self.noise.sample_raw(loc);
-        self.adapter.evaluate(result.into(), &mut rng)
+        self.adapter.evaluate(result.finish(&mut rng), &mut rng)
     }
 }
 
@@ -429,7 +443,7 @@ impl<T, I: VectorSpace, N, A> DynamicSampleable<I, T> for AdaptiveNoise<N, A> wh
 }
 
 /// Represents a [`NoiseOperationFor`] that contributes to the result via a [`NoiseFunction`] `T`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Octave<T>(pub T);
 
 impl<T, R: NoiseResultContext, W: NoiseWeights> NoiseOperation<R, W> for Octave<T> {
@@ -457,6 +471,50 @@ impl<
         let octave_result = self.0.evaluate(*working_loc, seeds);
         result.include_value(octave_result, weights.next_weight());
         seeds.update_seed();
+    }
+}
+
+/// Represents a [`NoiseOperationFor`] that contributes to the result via a [`NoiseFunction`] `T`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FractalOctaves<T> {
+    /// The [`NoiseOperation`] to perform.
+    pub octave: T,
+    /// lacunarity measures how far apart each octave will be.
+    /// Effectively, this is a frequency multiplier.
+    /// Ex: if this is 3, each octave will operate on 1/3 the scale.
+    ///
+    /// A good default is 2.
+    pub lacunarity: f32,
+    /// The number of times to do this octave.
+    pub octaves: u32,
+}
+
+impl<T: NoiseOperation<R, W>, R: NoiseResultContext, W: NoiseWeights> NoiseOperation<R, W>
+    for FractalOctaves<T>
+{
+    #[inline]
+    fn prepare(&self, result_context: &mut R, weights: &mut W) {
+        for _ in 0..self.octaves {
+            self.octave.prepare(result_context, weights);
+        }
+    }
+}
+
+impl<I: VectorSpace, T: NoiseOperationFor<I, R, W>, R: NoiseResultContext, W: NoiseWeights>
+    NoiseOperationFor<I, R, W> for FractalOctaves<T>
+{
+    #[inline]
+    fn do_noise_op(
+        &self,
+        seeds: &mut RngContext,
+        working_loc: &mut I,
+        result: &mut <R as NoiseResultContext>::Result,
+        weights: &mut W,
+    ) {
+        for _ in 0..self.octaves {
+            self.octave.do_noise_op(seeds, working_loc, result, weights);
+            *working_loc = *working_loc * self.lacunarity;
+        }
     }
 }
 
