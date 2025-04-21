@@ -19,15 +19,31 @@ pub trait NoiseRngInput {
 }
 
 impl NoiseRng {
-    /// This is a large, nearly prime number with even bit distribution.
+    /// This is a large prime number with even bit distribution.
     /// This lets use use this as a multiplier in the rng.
-    const KEY: u32 = 104_395_403;
+    const KEY: u32 = 249_222_277;
+    /// These keys are designed to help collapse different dimensions of inputs together.
+    const COEFFICIENT_KEYS: [u32; 3] = [189_221_569, 139_217_773, 149_243_933];
+
+    /// Determenisticly changes the seed significantly.
+    #[inline(always)]
+    pub fn re_seed(&mut self) {
+        self.0 = Self::KEY.wrapping_mul(self.0);
+    }
+
+    /// Creates a new [`NoiseRng`] that has a seed that will operate independently of this one and others that have different `branch_id`s.
+    /// If you're not sure what id to use, use a constant and then call [`Self::re_seed`] before branching again.
+    #[inline(always)]
+    pub fn branch(&mut self, branch_id: u32) -> Self {
+        Self(self.rand_u32(branch_id))
+    }
 
     /// Based on `input`, generates a random `u32`.
     #[inline(always)]
     pub fn rand_u32(&self, input: impl NoiseRngInput) -> u32 {
-        (input.collapse_for_rng() ^ self.0) // salt with the seed
-            .wrapping_mul(Self::KEY) // multiply to remove any linear artifacts
+        let i = input.collapse_for_rng();
+        let a = i.wrapping_mul(Self::KEY);
+        (a ^ i ^ self.0).wrapping_mul(Self::KEY)
     }
 
     /// Based on `input`, generates a random `f32` in range 0..1 and a byte of remanining entropy from the seed.
@@ -100,203 +116,51 @@ impl NoiseRngInput for u32 {
     }
 }
 
-/// This is a helper for [`NoiseRngInput::collapse_for_rng`].
-/// It collapses a seriese of `u32`s into one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NoiseRngCollapser {
-    current: u32,
-}
-
-impl NoiseRngCollapser {
-    /// Includes `value` in the collapsed entropy.
-    #[inline(always)]
-    pub fn include(&mut self, value: u32) -> &mut Self {
-        // The breaker value must depended on both the `value` and the `collapsed` to prevent it getting stuck.
-        // We need addition to keep this getting stuck when `value` or `collapsed` are 0.
-        let breaker = (value ^ self.current).wrapping_add(NoiseRng::KEY);
-        // We need the multiplication to put each axis on different orders, and we need xor to make each axis "recoverable" from zero.
-        // The multiplication can be pipelined with computing the `breaker`. Effectively the cost is just multiplication.
-        self.current = value.wrapping_mul(self.current) ^ breaker;
-        self
-    }
-
-    /// Returns the final entropy after calling [`include`](Self::include) however many times.
-    #[inline(always)]
-    pub fn finish(self) -> u32 {
-        self.current
-    }
-}
-
-impl Default for NoiseRngCollapser {
-    #[inline(always)]
-    fn default() -> Self {
-        Self {
-            current: NoiseRng::KEY,
-        }
-    }
-}
-
-impl<const N: usize> NoiseRngInput for [u32; N] {
-    #[inline(always)]
-    fn collapse_for_rng(self) -> u32 {
-        let mut collapsed = NoiseRngCollapser::default();
-        for v in self {
-            collapsed.include(v);
-        }
-        collapsed.finish()
-    }
-}
-
-impl NoiseRngInput for &[u32] {
-    #[inline(always)]
-    fn collapse_for_rng(self) -> u32 {
-        let mut collapsed = NoiseRngCollapser::default();
-        for &v in self {
-            collapsed.include(v);
-        }
-        collapsed.finish()
-    }
-}
-
 impl NoiseRngInput for UVec2 {
     #[inline(always)]
     fn collapse_for_rng(self) -> u32 {
-        let mut collapsed = NoiseRngCollapser::default();
-        collapsed.include(self.x).include(self.y);
-        collapsed.finish()
+        self.x
+            .wrapping_add(self.y.wrapping_mul(NoiseRng::COEFFICIENT_KEYS[0]))
     }
 }
 
 impl NoiseRngInput for UVec3 {
     #[inline(always)]
     fn collapse_for_rng(self) -> u32 {
-        let mut collapsed = NoiseRngCollapser::default();
-        collapsed.include(self.x).include(self.y).include(self.z);
-        collapsed.finish()
+        self.x
+            .wrapping_add(self.y.wrapping_mul(NoiseRng::COEFFICIENT_KEYS[0]))
+            .wrapping_add(self.z.wrapping_mul(NoiseRng::COEFFICIENT_KEYS[1]))
     }
 }
 
 impl NoiseRngInput for UVec4 {
     #[inline(always)]
     fn collapse_for_rng(self) -> u32 {
-        let mut collapsed = NoiseRngCollapser::default();
-        collapsed
-            .include(self.x)
-            .include(self.y)
-            .include(self.z)
-            .include(self.w);
-        collapsed.finish()
-    }
-}
-
-impl<const N: usize> NoiseRngInput for [i32; N] {
-    #[inline(always)]
-    fn collapse_for_rng(self) -> u32 {
-        let mut collapsed = NoiseRngCollapser::default();
-        for v in self {
-            collapsed.include(v as u32);
-        }
-        collapsed.finish()
-    }
-}
-
-impl NoiseRngInput for &[i32] {
-    #[inline(always)]
-    fn collapse_for_rng(self) -> u32 {
-        let mut collapsed = NoiseRngCollapser::default();
-        for &v in self {
-            collapsed.include(v as u32);
-        }
-        collapsed.finish()
+        self.x
+            .wrapping_add(self.y.wrapping_mul(NoiseRng::COEFFICIENT_KEYS[0]))
+            .wrapping_add(self.z.wrapping_mul(NoiseRng::COEFFICIENT_KEYS[1]))
+            .wrapping_add(self.w.wrapping_mul(NoiseRng::COEFFICIENT_KEYS[2]))
     }
 }
 
 impl NoiseRngInput for IVec2 {
     #[inline(always)]
     fn collapse_for_rng(self) -> u32 {
-        let mut collapsed = NoiseRngCollapser::default();
-        collapsed.include(self.x as u32).include(self.y as u32);
-        collapsed.finish()
+        self.as_uvec2().collapse_for_rng()
     }
 }
 
 impl NoiseRngInput for IVec3 {
     #[inline(always)]
     fn collapse_for_rng(self) -> u32 {
-        let mut collapsed = NoiseRngCollapser::default();
-        collapsed
-            .include(self.x as u32)
-            .include(self.y as u32)
-            .include(self.z as u32);
-        collapsed.finish()
+        self.as_uvec3().collapse_for_rng()
     }
 }
 
 impl NoiseRngInput for IVec4 {
     #[inline(always)]
     fn collapse_for_rng(self) -> u32 {
-        let mut collapsed = NoiseRngCollapser::default();
-        collapsed
-            .include(self.x as u32)
-            .include(self.y as u32)
-            .include(self.z as u32)
-            .include(self.w as u32);
-        collapsed.finish()
-    }
-}
-
-/// A context of [`NoiseRng`]s. This generates seeds and rngs.
-///
-/// This stores the seed of the RNG.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct RngContext {
-    rng: NoiseRng,
-    entropy: u32,
-}
-
-impl RngContext {
-    /// Provides the next [`NoiseRng`] to be generated.
-    #[inline(always)]
-    pub fn rng(&self) -> NoiseRng {
-        self.rng
-    }
-
-    /// Changes the rng to use another random seed.
-    #[inline(always)]
-    pub fn update_seed(&mut self) {
-        self.rng = NoiseRng(self.rng.rand_u32(self.entropy));
-    }
-
-    /// Creates a different [`RngContext`] that will yield values independent of this one.
-    #[inline(always)]
-    pub fn branch(&mut self) -> Self {
-        let result = Self::new(
-            self.rng().rand_u32(self.entropy),
-            NoiseRng(self.entropy).rand_u32(self.rng.0),
-        );
-        self.update_seed();
-        result
-    }
-
-    /// Creates a [`RngContext`] with this entropy and seed.
-    #[inline(always)]
-    pub fn new(seed: u32, entropy: u32) -> Self {
-        Self {
-            rng: NoiseRng(seed),
-            entropy,
-        }
-    }
-
-    /// Creates a [`RngContext`] with entropy and seed from these `bits`.
-    #[inline(always)]
-    pub fn from_bits(bits: u64) -> Self {
-        Self::new((bits >> 32) as u32, bits as u32)
-    }
-
-    /// Creates a [`RngContext`] with entropy and seed from these `bits`.
-    #[inline(always)]
-    pub fn to_bits(self) -> u64 {
-        ((self.rng.0 as u64) << 32) | (self.entropy as u64)
+        self.as_uvec4().collapse_for_rng()
     }
 }
 
@@ -308,8 +172,8 @@ impl<T: NoiseRngInput> NoiseFunction<T> for Random {
     type Output = u32;
 
     #[inline]
-    fn evaluate(&self, input: T, seeds: &mut RngContext) -> Self::Output {
-        seeds.rng().rand_u32(input)
+    fn evaluate(&self, input: T, seeds: &mut NoiseRng) -> Self::Output {
+        seeds.rand_u32(input)
     }
 }
 
@@ -321,7 +185,7 @@ impl NoiseFunction<u32> for UValue {
     type Output = f32;
 
     #[inline]
-    fn evaluate(&self, input: u32, _seeds: &mut RngContext) -> Self::Output {
+    fn evaluate(&self, input: u32, _seeds: &mut NoiseRng) -> Self::Output {
         NoiseRng::any_unorm(input)
     }
 }
@@ -334,7 +198,7 @@ impl NoiseFunction<u32> for IValue {
     type Output = f32;
 
     #[inline]
-    fn evaluate(&self, input: u32, _seeds: &mut RngContext) -> Self::Output {
+    fn evaluate(&self, input: u32, _seeds: &mut NoiseRng) -> Self::Output {
         NoiseRng::any_snorm(input)
     }
 }
