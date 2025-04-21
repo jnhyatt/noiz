@@ -18,6 +18,10 @@ pub trait NoiseRngInput {
     fn collapse_for_rng(self) -> u32;
 }
 
+#[expect(
+    clippy::unusual_byte_groupings,
+    reason = "In float rng, we do bit tricks and want to show what each part does."
+)]
 impl NoiseRng {
     /// This is a large prime number with even bit distribution.
     /// This lets use use this as a multiplier in the rng.
@@ -46,66 +50,38 @@ impl NoiseRng {
         (a ^ i ^ self.0).wrapping_mul(Self::KEY)
     }
 
-    /// Based on `input`, generates a random `f32` in range 0..1 and a byte of remanining entropy from the seed.
+    /// Based on `bits`, generates an arbitrary `f32` in range (1, 2), with enough precision padding that other operations should not spiral out of range.
+    /// This only actually uses 16 of these 32 bits.
     #[inline(always)]
-    pub fn rand_unorm_with_entropy(&self, input: impl NoiseRngInput) -> (f32, u8) {
-        Self::any_unorm_with_entropy(self.rand_u32(input))
+    pub fn any_rng_float_32(bits: u32) -> f32 {
+        /// The base value bits for the floats we make.
+        /// Positive sign, exponent of 0    , 16 value bits    7 bits as precision padding.
+        const BASE_VALUE: u32 = 0b0_01111111_00000000_00000000_0111111;
+        const BIT_MASK: u32 = (u16::MAX as u32) << 7;
+        let result = BASE_VALUE | (bits & BIT_MASK);
+        f32::from_bits(result)
     }
 
-    /// Based on `input`, generates a random `f32` in range (-1, 1) and a byte of remanining entropy from the seed.
-    /// Note that the sign of the snorm can be determined by the least bit of the returned `u8`.
+    /// Based on `bits`, generates an arbitrary `f32` in range (1, 2), with enough precision padding that other operations should not spiral out of range.
     #[inline(always)]
-    pub fn rand_snorm_with_entropy(&self, input: impl NoiseRngInput) -> (f32, u8) {
-        Self::any_snorm_with_entropy(self.rand_u32(input))
+    pub fn any_rng_float_16(bits: u16) -> f32 {
+        /// The base value bits for the floats we make.
+        /// Positive sign, exponent of 0    , 16 value bits    7 bits as precision padding.
+        const BASE_VALUE: u32 = 0b0_01111111_00000000_00000000_0111111;
+        let bits = bits as u32;
+        let result = BASE_VALUE | (bits << 7);
+        f32::from_bits(result)
     }
 
-    /// Based on `input`, generates a random `f32` in range 0..1.
+    /// Based on `bits`, generates an arbitrary `f32` in range (1, 2), with enough precision padding that other operations should not spiral out of range.
     #[inline(always)]
-    pub fn rand_unorm(&self, input: impl NoiseRngInput) -> f32 {
-        Self::any_unorm(self.rand_u32(input))
-    }
-
-    /// Based on `input`, generates a random `f32` in range (-1, 1).
-    #[inline(always)]
-    pub fn rand_snorm(&self, input: impl NoiseRngInput) -> f32 {
-        Self::any_snorm(self.rand_u32(input))
-    }
-
-    /// Based on `bits`, generates an arbitrary `f32` in range 0..1 and a byte of remanining entropy.
-    #[inline(always)]
-    pub fn any_unorm_with_entropy(bits: u32) -> (f32, u8) {
-        // adapted from rand's `StandardUniform`
-
-        let fraction_bits = 23;
-        let float_size = size_of::<f32>() as u32 * 8;
-        let precision = fraction_bits + 1;
-        let scale = 1f32 / ((1u32 << precision) as f32);
-
-        // We use a right shift instead of a mask, because the upper bits tend to be more "random" and it has the same performance.
-        let value = bits >> (float_size - precision);
-        (scale * value as f32, bits as u8)
-    }
-
-    /// Based on `bits`, generates an arbitrary`f32` in range (-1, 1) and a byte of remanining entropy.
-    /// Note that the sign of the snorm can be determined by the least bit of the returned `u8`.
-    #[inline(always)]
-    pub fn any_snorm_with_entropy(bits: u32) -> (f32, u8) {
-        let (unorm, entropy) = Self::any_unorm_with_entropy(bits);
-        // Use the least bit of entropy as the sign bit
-        let snorm = f32::from_bits(unorm.to_bits() ^ ((entropy as u32) << 31));
-        (snorm, entropy)
-    }
-
-    /// Based on `bits`, generates an arbitrary `f32` in range 0..1.
-    #[inline(always)]
-    pub fn any_unorm(bits: u32) -> f32 {
-        Self::any_unorm_with_entropy(bits).0
-    }
-
-    /// Based on `bits`, generates an arbitrary `f32` in range (-1, 1).
-    #[inline(always)]
-    pub fn any_snorm(bits: u32) -> f32 {
-        Self::any_snorm_with_entropy(bits).0
+    pub fn any_rng_float_8(bits: u8) -> f32 {
+        /// The base value bits for the floats we make.
+        /// Positive sign, exponent of 0    , 8 value bits    15 bits as precision padding.
+        const BASE_VALUE: u32 = 0b0_01111111_00000000_010101010111111;
+        let bits = bits as u32;
+        let result = BASE_VALUE | (bits << 15);
+        f32::from_bits(result)
     }
 }
 
@@ -177,7 +153,7 @@ impl<T: NoiseRngInput> NoiseFunction<T> for Random {
     }
 }
 
-/// A [`NoiseFunction`] that takes a `u32` and produces an arbitrary `f32` in range 0..1.
+/// A [`NoiseFunction`] that takes a `u32` and produces an arbitrary `f32` in range (0, 1).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct UValue;
 
@@ -185,8 +161,8 @@ impl NoiseFunction<u32> for UValue {
     type Output = f32;
 
     #[inline]
-    fn evaluate(&self, input: u32, _seeds: &mut NoiseRng) -> Self::Output {
-        NoiseRng::any_unorm(input)
+    fn evaluate(&self, input: u32, seeds: &mut NoiseRng) -> Self::Output {
+        self.finish_value(self.evaluate_pre_mix(input, seeds))
     }
 }
 
@@ -198,7 +174,60 @@ impl NoiseFunction<u32> for IValue {
     type Output = f32;
 
     #[inline]
-    fn evaluate(&self, input: u32, _seeds: &mut NoiseRng) -> Self::Output {
-        NoiseRng::any_snorm(input)
+    fn evaluate(&self, input: u32, seeds: &mut NoiseRng) -> Self::Output {
+        self.finish_value(self.evaluate_pre_mix(input, seeds))
+    }
+}
+
+/// Represents some type that can convert some random bits into an output, mix it up, and then perform some finalization on it.
+pub trait FastRandomMixed {
+    /// The output of the function.
+    type Output;
+
+    /// Evaluates some random bits to some output quickly.
+    fn evaluate_pre_mix(&self, random: u32, seeds: &mut NoiseRng) -> Self::Output;
+
+    /// Finishes the evaluation, performing a map from the `post_mix` to some final domain.
+    fn finish_value(&self, post_mix: Self::Output) -> Self::Output;
+
+    /// Returns the derivative of [`FastRandomMixed::finish_value`].
+    fn finishing_derivative(&self) -> f32;
+}
+
+impl FastRandomMixed for UValue {
+    type Output = f32;
+
+    #[inline]
+    fn evaluate_pre_mix(&self, random: u32, _seeds: &mut NoiseRng) -> Self::Output {
+        NoiseRng::any_rng_float_32(random)
+    }
+
+    #[inline(always)]
+    fn finish_value(&self, post_mix: Self::Output) -> Self::Output {
+        post_mix - 1.0
+    }
+
+    #[inline(always)]
+    fn finishing_derivative(&self) -> f32 {
+        1.0
+    }
+}
+
+impl FastRandomMixed for IValue {
+    type Output = f32;
+
+    #[inline]
+    fn evaluate_pre_mix(&self, random: u32, _seeds: &mut NoiseRng) -> Self::Output {
+        NoiseRng::any_rng_float_32(random)
+    }
+
+    #[inline(always)]
+    fn finish_value(&self, post_mix: Self::Output) -> Self::Output {
+        (post_mix - 1.5) * 2.0
+    }
+
+    #[inline(always)]
+    fn finishing_derivative(&self) -> f32 {
+        2.0
     }
 }
