@@ -5,7 +5,7 @@ use bevy_math::{IVec2, IVec3, IVec4, UVec2, UVec3, UVec4};
 
 use crate::NoiseFunction;
 
-/// A seeded RNG inspired by [FxHash](https://crates.io/crates/fxhash).
+/// A seeded RNG.
 /// This is similar to a hash function, but does not use std's hash traits, as those produce `u64` outputs only.
 ///
 /// This stores the seed of the RNG.
@@ -26,8 +26,6 @@ impl NoiseRng {
     /// This is a large prime number with even bit distribution.
     /// This lets use use this as a multiplier in the rng.
     const KEY: u32 = 249_222_277;
-    /// These keys are designed to help collapse different dimensions of inputs together.
-    const COEFFICIENT_KEYS: [u32; 3] = [189_221_569, 139_217_773, 149_243_933];
 
     /// Determenisticly changes the seed significantly.
     #[inline(always)]
@@ -46,8 +44,34 @@ impl NoiseRng {
     #[inline(always)]
     pub fn rand_u32(&self, input: impl NoiseRngInput) -> u32 {
         let i = input.collapse_for_rng();
-        let a = i.wrapping_mul(Self::KEY);
-        (a ^ i ^ self.0).wrapping_mul(Self::KEY)
+
+        let a = i.rotate_left(11) ^ i ^ self.0;
+        let b = a.wrapping_mul(a);
+        let c = b.rotate_right(11);
+        c.wrapping_mul(c)
+
+        // Good hash. Pretty fast. Not as fast as others.
+        // let a = i
+        //     .rotate_left(11)
+        //     .wrapping_mul(i ^ Self::KEY) // XOR just to move the 0 mul
+        //     .wrapping_add(self.0);
+        // a.rotate_right(11).wrapping_mul(a)
+
+        // WIP ok hash. Try to use only one mul, but nor worth it.
+        // let a = i.rotate_left(7) ^ i;
+        // let b = a.rotate_right(11) ^ a;
+        // let c = b.rotate_left(11) ^ b;
+        // c.wrapping_mul(b.wrapping_add(self.0))
+
+        // Bad but fast hash.
+        // let a = i.wrapping_mul(Self::KEY);
+        // (a ^ i ^ self.0).wrapping_mul(Self::KEY)
+
+        // Try packing bits into a u64 to reduce instructions
+        // let a = (i.wrapping_add(self.0) as u64) << 32 | (i ^ Self::KEY) as u64;
+        // let b = a.rotate_right(22).wrapping_mul(a);
+        // let c = b.rotate_right(32) ^ b;
+        // c as u32
     }
 
     /// Based on `bits`, generates an arbitrary `f32` in range (1, 2), with enough precision padding that other operations should not spiral out of range.
@@ -95,8 +119,7 @@ impl NoiseRngInput for u32 {
 impl NoiseRngInput for UVec2 {
     #[inline(always)]
     fn collapse_for_rng(self) -> u32 {
-        self.x
-            .wrapping_add(self.y.wrapping_mul(NoiseRng::COEFFICIENT_KEYS[0]))
+        self.x.wrapping_add(self.y.rotate_right(8))
     }
 }
 
@@ -104,8 +127,8 @@ impl NoiseRngInput for UVec3 {
     #[inline(always)]
     fn collapse_for_rng(self) -> u32 {
         self.x
-            .wrapping_add(self.y.wrapping_mul(NoiseRng::COEFFICIENT_KEYS[0]))
-            .wrapping_add(self.z.wrapping_mul(NoiseRng::COEFFICIENT_KEYS[1]))
+            .wrapping_add(self.y.rotate_right(8))
+            .wrapping_add(self.z.rotate_right(16))
     }
 }
 
@@ -113,9 +136,9 @@ impl NoiseRngInput for UVec4 {
     #[inline(always)]
     fn collapse_for_rng(self) -> u32 {
         self.x
-            .wrapping_add(self.y.wrapping_mul(NoiseRng::COEFFICIENT_KEYS[0]))
-            .wrapping_add(self.z.wrapping_mul(NoiseRng::COEFFICIENT_KEYS[1]))
-            .wrapping_add(self.w.wrapping_mul(NoiseRng::COEFFICIENT_KEYS[2]))
+            .wrapping_add(self.y.rotate_right(8))
+            .wrapping_add(self.z.rotate_right(16))
+            .wrapping_add(self.w.rotate_right(24))
     }
 }
 
