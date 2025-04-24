@@ -1,7 +1,9 @@
 //! Defines RNG for noise especially.
 //! This does not use the `rand` crate to enable more control and performance optimizations.
 
-use bevy_math::{IVec2, IVec3, IVec4, UVec2, UVec3, UVec4};
+use core::marker::PhantomData;
+
+use bevy_math::{IVec2, IVec3, IVec4, UVec2, UVec3, UVec4, Vec2, Vec3, Vec3A, Vec4};
 
 use crate::NoiseFunction;
 
@@ -18,10 +20,6 @@ pub trait NoiseRngInput {
     fn collapse_for_rng(self) -> u32;
 }
 
-#[expect(
-    clippy::unusual_byte_groupings,
-    reason = "In float rng, we do bit tricks and want to show what each part does."
-)]
 impl NoiseRng {
     /// This is a large prime number with even bit distribution.
     /// This lets use use this as a multiplier in the rng.
@@ -74,6 +72,13 @@ impl NoiseRng {
         // let c = b.rotate_right(32) ^ b;
         // c as u32
     }
+}
+
+mod float_rng {
+    #![expect(
+        clippy::unusual_byte_groupings,
+        reason = "In float rng, we do bit tricks and want to show what each part does."
+    )]
 
     /// Based on `bits`, generates an arbitrary `f32` in range (1, 2), with enough precision padding that other operations should not spiral out of range.
     /// This only actually uses 16 of these 32 bits.
@@ -109,6 +114,7 @@ impl NoiseRng {
         f32::from_bits(result)
     }
 }
+pub use float_rng::*;
 
 impl NoiseRngInput for u32 {
     #[inline(always)]
@@ -164,94 +170,138 @@ impl NoiseRngInput for IVec4 {
     }
 }
 
+/// A version of [`AnyValueFromBits`] that is for a specific value type.
+pub trait ConcreteAnyValueFromBits: AnyValueFromBits<Self::Concrete> {
+    /// The type that this generates values for.
+    type Concrete;
+}
+
 /// A [`NoiseFunction`] that takes any [`RngNoiseInput`] and produces a fully random `u32`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct Random;
+pub struct Random<R, T>(pub R, pub PhantomData<T>);
 
-impl<T: NoiseRngInput> NoiseFunction<T> for Random {
-    type Output = u32;
+impl<O, R: AnyValueFromBits<O>> AnyValueFromBits<O> for Random<R, O> {
+    #[inline(always)]
+    fn linear_equivalent_value(&self, bits: u32) -> O {
+        self.0.linear_equivalent_value(bits)
+    }
+
+    #[inline(always)]
+    fn finish_linear_equivalent_value(&self, value: O) -> O {
+        self.0.finish_linear_equivalent_value(value)
+    }
+
+    #[inline(always)]
+    fn finishing_derivative(&self) -> f32 {
+        self.0.finishing_derivative()
+    }
+
+    #[inline(always)]
+    fn any_value(&self, bits: u32) -> O {
+        self.0.any_value(bits)
+    }
+}
+
+impl<O, R: AnyValueFromBits<O>> ConcreteAnyValueFromBits for Random<R, O> {
+    type Concrete = O;
+}
+
+impl<I: NoiseRngInput, O, R: AnyValueFromBits<O>> NoiseFunction<I> for Random<R, O> {
+    type Output = O;
 
     #[inline]
-    fn evaluate(&self, input: T, seeds: &mut NoiseRng) -> Self::Output {
-        seeds.rand_u32(input)
+    fn evaluate(&self, input: I, seeds: &mut NoiseRng) -> Self::Output {
+        let bits = seeds.rand_u32(input);
+        self.0.any_value(bits)
     }
 }
 
 /// A [`NoiseFunction`] that takes a `u32` and produces an arbitrary `f32` in range (0, 1).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct UValue;
-
-impl NoiseFunction<u32> for UValue {
-    type Output = f32;
-
-    #[inline]
-    fn evaluate(&self, input: u32, seeds: &mut NoiseRng) -> Self::Output {
-        self.finish_value(self.evaluate_pre_mix(input, seeds))
-    }
-}
+pub struct UNorm;
 
 /// A [`NoiseFunction`] that takes a `u32` and produces an arbitrary `f32` in range (-1, 1).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct IValue;
+pub struct SNorm;
 
-impl NoiseFunction<u32> for IValue {
-    type Output = f32;
+/// Represents some type that can convert some random bits into an output `T`.
+pub trait AnyValueFromBits<T> {
+    /// Produces a value `T` from `bits` that can be linearly mapped back to the proper distriburion.
+    ///
+    /// This is useful if you want to linearly mix these values together, only remapping them at the end.
+    /// This will only hold true if the values are always mixed linearly. (The linear interpolator `t` doesn't need to be linear but the end lerp does.)
+    fn linear_equivalent_value(&self, bits: u32) -> T;
 
-    #[inline]
-    fn evaluate(&self, input: u32, seeds: &mut NoiseRng) -> Self::Output {
-        self.finish_value(self.evaluate_pre_mix(input, seeds))
-    }
-}
+    /// Liniarly remaps a value from some linear combination of results from [`linear_equivalent_value`](linear_equivalent_value::AnyValueFromBits)
+    fn finish_linear_equivalent_value(&self, value: T) -> T;
 
-/// Represents some type that can convert some random bits into an output, mix it up, and then perform some finalization on it.
-pub trait FastRandomMixed {
-    /// The output of the function.
-    type Output;
-
-    /// Evaluates some random bits to some output quickly.
-    fn evaluate_pre_mix(&self, random: u32, seeds: &mut NoiseRng) -> Self::Output;
-
-    /// Finishes the evaluation, performing a map from the `post_mix` to some final domain.
-    fn finish_value(&self, post_mix: Self::Output) -> Self::Output;
-
-    /// Returns the derivative of [`FastRandomMixed::finish_value`].
+    /// Returns the derivative of [`finish_linear_equivalent_value`](AnyValueFromBits::finish_linear_equivalent_value).
+    /// This is a single `f32` since the function is always linear.
     fn finishing_derivative(&self) -> f32;
-}
 
-impl FastRandomMixed for UValue {
-    type Output = f32;
-
+    /// Generates a valid value in this distriburion.
     #[inline]
-    fn evaluate_pre_mix(&self, random: u32, _seeds: &mut NoiseRng) -> Self::Output {
-        NoiseRng::any_rng_float_32(random)
-    }
-
-    #[inline(always)]
-    fn finish_value(&self, post_mix: Self::Output) -> Self::Output {
-        post_mix - 1.0
-    }
-
-    #[inline(always)]
-    fn finishing_derivative(&self) -> f32 {
-        1.0
+    fn any_value(&self, bits: u32) -> T {
+        self.finish_linear_equivalent_value(self.linear_equivalent_value(bits))
     }
 }
 
-impl FastRandomMixed for IValue {
-    type Output = f32;
+macro_rules! impl_norms {
+    ($t:ty, $builder:expr) => {
+        impl AnyValueFromBits<$t> for UNorm {
+            #[inline]
+            fn linear_equivalent_value(&self, bits: u32) -> $t {
+                $builder(bits)
+            }
 
-    #[inline]
-    fn evaluate_pre_mix(&self, random: u32, _seeds: &mut NoiseRng) -> Self::Output {
-        NoiseRng::any_rng_float_32(random)
-    }
+            #[inline(always)]
+            fn finish_linear_equivalent_value(&self, value: $t) -> $t {
+                value - 1.0
+            }
 
-    #[inline(always)]
-    fn finish_value(&self, post_mix: Self::Output) -> Self::Output {
-        (post_mix - 1.5) * 2.0
-    }
+            #[inline(always)]
+            fn finishing_derivative(&self) -> f32 {
+                1.0
+            }
+        }
 
-    #[inline(always)]
-    fn finishing_derivative(&self) -> f32 {
-        2.0
-    }
+        impl AnyValueFromBits<$t> for SNorm {
+            #[inline]
+            fn linear_equivalent_value(&self, bits: u32) -> $t {
+                $builder(bits)
+            }
+
+            #[inline(always)]
+            fn finish_linear_equivalent_value(&self, value: $t) -> $t {
+                value * 2.0 - 3.0
+            }
+
+            #[inline(always)]
+            fn finishing_derivative(&self) -> f32 {
+                2.0
+            }
+        }
+    };
 }
+
+impl_norms!(f32, any_rng_float_32);
+impl_norms!(Vec2, |bits| Vec2::new(
+    any_rng_float_16((bits >> 16) as u16),
+    any_rng_float_16(bits as u16),
+));
+impl_norms!(Vec3, |bits| Vec3::new(
+    any_rng_float_8((bits >> 24) as u8),
+    any_rng_float_8((bits >> 16) as u8),
+    any_rng_float_8((bits >> 8) as u8),
+));
+impl_norms!(Vec3A, |bits| Vec3A::new(
+    any_rng_float_8((bits >> 24) as u8),
+    any_rng_float_8((bits >> 16) as u8),
+    any_rng_float_8((bits >> 8) as u8),
+));
+impl_norms!(Vec4, |bits| Vec4::new(
+    any_rng_float_8((bits >> 24) as u8),
+    any_rng_float_8((bits >> 16) as u8),
+    any_rng_float_8((bits >> 8) as u8),
+    any_rng_float_8(bits as u8),
+));

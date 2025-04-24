@@ -9,7 +9,7 @@ use bevy_math::{
 use crate::{
     NoiseFunction,
     cells::{DiferentiableCell, DomainCell, InterpolatableCell, Partitioner, WithGradient},
-    rng::{FastRandomMixed, NoiseRng},
+    rng::{ConcreteAnyValueFromBits, NoiseRng},
 };
 
 /// A [`NoiseFunction`] that sharply jumps between values for different [`DomainCell`]s form a [`Partitioner`] `S`, where each value is from a [`NoiseFunction<u32>`] `N`.
@@ -48,20 +48,20 @@ impl<
     I: VectorSpace,
     P: Partitioner<I, Cell: InterpolatableCell>,
     C: Curve<f32>,
-    N: FastRandomMixed<Output: VectorSpace>,
+    N: ConcreteAnyValueFromBits<Concrete: VectorSpace>,
 > NoiseFunction<I> for MixCellValues<P, C, N, false>
 {
-    type Output = N::Output;
+    type Output = N::Concrete;
 
     #[inline]
     fn evaluate(&self, input: I, seeds: &mut NoiseRng) -> Self::Output {
         let segment = self.cells.partition(input);
         let raw = segment.interpolate_within(
             *seeds,
-            |point| self.noise.evaluate_pre_mix(point.rough_id, seeds),
+            |point| self.noise.linear_equivalent_value(point.rough_id),
             &self.curve,
         );
-        self.noise.finish_value(raw)
+        self.noise.finish_linear_equivalent_value(raw)
     }
 }
 
@@ -69,22 +69,22 @@ impl<
     I: VectorSpace,
     P: Partitioner<I, Cell: DiferentiableCell>,
     C: SampleDerivative<f32>,
-    N: FastRandomMixed<Output: VectorSpace>,
+    N: ConcreteAnyValueFromBits<Concrete: VectorSpace>,
 > NoiseFunction<I> for MixCellValues<P, C, N, true>
 {
-    type Output = WithGradient<N::Output, <P::Cell as DiferentiableCell>::Gradient<N::Output>>;
+    type Output = WithGradient<N::Concrete, <P::Cell as DiferentiableCell>::Gradient<N::Concrete>>;
 
     #[inline]
     fn evaluate(&self, input: I, seeds: &mut NoiseRng) -> Self::Output {
         let segment = self.cells.partition(input);
         let WithGradient { value, gradient } = segment.interpolate_with_gradient(
             *seeds,
-            |point| self.noise.evaluate_pre_mix(point.rough_id, seeds),
+            |point| self.noise.linear_equivalent_value(point.rough_id),
             &self.curve,
             self.noise.finishing_derivative(),
         );
         WithGradient {
-            value: self.noise.finish_value(value),
+            value: self.noise.finish_linear_equivalent_value(value),
             gradient,
         }
     }
@@ -117,16 +117,17 @@ pub struct BlendCellValues<P, B, N, const DIFFERENTIATE: bool = false> {
     pub blender: B,
 }
 
-impl<I: VectorSpace, P: Partitioner<I>, B: Blender<I, N::Output>, N: NoiseFunction<u32>>
+impl<I: VectorSpace, P: Partitioner<I>, B: Blender<I, N::Concrete>, N: ConcreteAnyValueFromBits>
     NoiseFunction<I> for BlendCellValues<P, B, N, false>
 {
-    type Output = N::Output;
+    type Output = N::Concrete;
 
     #[inline]
     fn evaluate(&self, input: I, seeds: &mut NoiseRng) -> Self::Output {
         let segment = self.cells.partition(input);
         let weighted = segment.iter_points(*seeds).map(|p| {
-            let value = self.noise.evaluate(p.rough_id, seeds);
+            // We can't use the `linear_equivalent_value` because the blend type is not linear.
+            let value = self.noise.any_value(p.rough_id);
             self.blender.weigh_value(value, p.offset)
         });
         self.blender.collect_weighted(weighted)
@@ -136,17 +137,17 @@ impl<I: VectorSpace, P: Partitioner<I>, B: Blender<I, N::Output>, N: NoiseFuncti
 impl<
     I: VectorSpace,
     P: Partitioner<I>,
-    B: Blender<I, WithGradient<N::Output, I>>,
-    N: NoiseFunction<u32>,
+    B: Blender<I, WithGradient<N::Concrete, I>>,
+    N: ConcreteAnyValueFromBits,
 > NoiseFunction<I> for BlendCellValues<P, B, N, true>
 {
-    type Output = WithGradient<N::Output, I>;
+    type Output = WithGradient<N::Concrete, I>;
 
     #[inline]
     fn evaluate(&self, input: I, seeds: &mut NoiseRng) -> Self::Output {
         let segment = self.cells.partition(input);
         let weighted = segment.iter_points(*seeds).map(|p| {
-            let value = self.noise.evaluate(p.rough_id, seeds);
+            let value = self.noise.any_value(p.rough_id);
             // TODO: Verify that this gradient is correct. Does the blender naturally do this correctly?
             self.blender.weigh_value(
                 WithGradient {
