@@ -8,8 +8,11 @@ use bevy::{
 use noiz::{
     AdaptiveNoise, DynamicSampleable, FractalOctaves, LayeredNoise, Noise, Normed, Octave,
     Persistence,
-    cell_noise::{Cellular, GradientCell, MixedCell, QuickGradients},
-    cells::{Grid, SimplexGrid},
+    cell_noise::{
+        BlendCellGradients, BlendCellValues, Cellular, MixCellGradients, MixCellValues,
+        QuickGradients, SimplecticBlend,
+    },
+    cells::{OrthoGrid, SimplexGrid},
     common_adapters::SNormToUNorm,
     curves::{Linear, Smoothstep},
     rng::UValue,
@@ -75,7 +78,7 @@ fn main() -> AppExit {
                     options: vec![
                         NoiseOption {
                             name: "Basic white noise",
-                            noise: Box::new(Noise::<Cellular<Grid, UValue>>::default()),
+                            noise: Box::new(Noise::<Cellular<OrthoGrid, UValue>>::default()),
                         },
                         NoiseOption {
                             name: "Simlex white noise",
@@ -83,20 +86,33 @@ fn main() -> AppExit {
                         },
                         NoiseOption {
                             name: "Basic value noise",
-                            noise: Box::new(Noise::<
-                                MixedCell<Grid, Linear, UValue>,
-                            >::default()),
+                            noise: Box::new(
+                                Noise::<MixCellValues<OrthoGrid, Linear, UValue>>::default(),
+                            ),
                         },
                         NoiseOption {
                             name: "Smooth value noise",
+                            noise: Box::new(
+                                Noise::<MixCellValues<OrthoGrid, Smoothstep, UValue>>::default(),
+                            ),
+                        },
+                        NoiseOption {
+                            name: "Simlex value noise",
                             noise: Box::new(Noise::<
-                                MixedCell<Grid, Smoothstep, UValue>,
+                                BlendCellValues<SimplexGrid, SimplecticBlend, UValue>,
                             >::default()),
                         },
                         NoiseOption {
                             name: "Perlin noise",
                             noise: Box::new(AdaptiveNoise::<
-                                GradientCell<Grid, Smoothstep, QuickGradients>,
+                                MixCellGradients<OrthoGrid, Smoothstep, QuickGradients>,
+                                SNormToUNorm,
+                            >::default()),
+                        },
+                        NoiseOption {
+                            name: "Simlex noise",
+                            noise: Box::new(AdaptiveNoise::<
+                                BlendCellGradients<SimplexGrid, SimplecticBlend, QuickGradients>,
                                 SNormToUNorm,
                             >::default()),
                         },
@@ -108,9 +124,35 @@ fn main() -> AppExit {
                                     Persistence,
                                     FractalOctaves<
                                         Octave<
-                                            GradientCell<
-                                                Grid,
-                                                Smoothstep,
+                                            MixCellGradients<OrthoGrid, Smoothstep, QuickGradients>,
+                                        >,
+                                    >,
+                                >,
+                                SNormToUNorm,
+                            > {
+                                noise: Noise::from(LayeredNoise::new(
+                                    Normed::default(),
+                                    Persistence(0.6),
+                                    FractalOctaves {
+                                        octave: Default::default(),
+                                        lacunarity: 1.8,
+                                        octaves: 8,
+                                    },
+                                )),
+                                adapter: SNormToUNorm,
+                            }),
+                        },
+                        NoiseOption {
+                            name: "Fractal Simplex noise",
+                            noise: Box::new(AdaptiveNoise::<
+                                LayeredNoise<
+                                    Normed<f32>,
+                                    Persistence,
+                                    FractalOctaves<
+                                        Octave<
+                                            BlendCellGradients<
+                                                SimplexGrid,
+                                                SimplecticBlend,
                                                 QuickGradients,
                                             >,
                                         >,
