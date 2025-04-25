@@ -10,7 +10,7 @@ use noiz::{
     Persistence,
     cell_noise::{
         BlendCellGradients, BlendCellValues, EuclideanLength, MixCellGradients, MixCellValues,
-        PerCell, PerNearestPoint, QuickGradients, SimplecticBlend,
+        PerCell, PerNearestPoint, QualityGradients, QuickGradients, SimplecticBlend,
     },
     cells::{OrthoGrid, SimplexGrid, Voronoi},
     common_adapters::SNormToUNorm,
@@ -116,6 +116,13 @@ fn main() -> AppExit {
                             name: "Perlin noise",
                             noise: Box::new(AdaptiveNoise::<
                                 MixCellGradients<OrthoGrid, Smoothstep, QuickGradients>,
+                                SNormToUNorm,
+                            >::default()),
+                        },
+                        NoiseOption {
+                            name: "Perlin quality noise",
+                            noise: Box::new(AdaptiveNoise::<
+                                MixCellGradients<OrthoGrid, Smoothstep, QualityGradients>,
                                 SNormToUNorm,
                             >::default()),
                         },
