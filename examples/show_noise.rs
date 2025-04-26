@@ -9,8 +9,10 @@ use noiz::{
     AdaptiveNoise, DynamicSampleable, FractalOctaves, LayeredNoise, Noise, Normed, Octave,
     Persistence,
     cell_noise::{
-        BlendCellGradients, BlendCellValues, EuclideanLength, MixCellGradients, MixCellValues,
-        PerCell, PerNearestPoint, QualityGradients, QuickGradients, SimplecticBlend,
+        BlendCellGradients, BlendCellValues, ChebyshevLength, DistanceToEdge, EuclideanLength,
+        MixCellGradients, MixCellValues, PerCell, PerLeastDistances, PerNearestPoint,
+        QualityGradients, QuickGradients, SimplecticBlend, WorleyAverage, WorleyDifference,
+        WorleyPointDistance,
     },
     cells::{OrthoGrid, SimplexGrid, Voronoi},
     common_adapters::SNormToUNorm,
@@ -203,6 +205,28 @@ fn main() -> AppExit {
                                     EuclideanLength,
                                     Random<UNorm, f32>,
                                 >,
+                            >::default()),
+                        },
+                        NoiseOption {
+                            name: "Worley noise",
+                            noise: Box::new(Noise::<
+                                PerLeastDistances<Voronoi, EuclideanLength, WorleyPointDistance>,
+                            >::default()),
+                        },
+                        NoiseOption {
+                            name: "Worley difference",
+                            noise: Box::new(Noise::<
+                                PerLeastDistances<Voronoi, EuclideanLength, WorleyDifference>,
+                            >::default()),
+                        },
+                        NoiseOption {
+                            name: "Worley distance to edge",
+                            noise: Box::new(Noise::<DistanceToEdge<Voronoi>>::default()),
+                        },
+                        NoiseOption {
+                            name: "Wacky Worley noise",
+                            noise: Box::new(Noise::<
+                                PerLeastDistances<Voronoi, ChebyshevLength, WorleyAverage>,
                             >::default()),
                         },
                     ],

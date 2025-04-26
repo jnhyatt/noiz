@@ -11,7 +11,10 @@ use bevy_math::{
 
 use crate::{
     NoiseFunction,
-    cells::{DiferentiableCell, DomainCell, InterpolatableCell, Partitioner, WithGradient},
+    cells::{
+        DiferentiableCell, DomainCell, InterpolatableCell, Partitioner, WithGradient,
+        WorleyDomainCell,
+    },
     rng::{AnyValueFromBits, ConcreteAnyValueFromBits, NoiseRng, SNormSplit, UNorm},
 };
 
@@ -24,9 +27,7 @@ pub struct PerCell<P, N> {
     pub noise: N,
 }
 
-impl<I: VectorSpace, P: Partitioner<I, Cell: DomainCell>, N: NoiseFunction<u32>> NoiseFunction<I>
-    for PerCell<P, N>
-{
+impl<I: VectorSpace, P: Partitioner<I>, N: NoiseFunction<u32>> NoiseFunction<I> for PerCell<P, N> {
     type Output = N::Output;
 
     #[inline]
@@ -62,6 +63,27 @@ pub struct HybridLength;
 /// A [`LengthFunction`] that evenly uses Chebyshev length, which is similar to [`ManhatanLength`].
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct ChebyshevLength;
+
+/// A configurable [`LengthFunction`] that bends space according to the inner float.
+/// Higher values pass [`EuclideanLength`] and approach [`ChebyshevLength`].
+/// Lower values pass [`ManhatanLength`] and approach a star-like shape.
+/// The inner value must be greater than 0 to be meaningful.
+///
+/// **Performance Warning:** This is *very* slow compared to other [`LengthFunction`]s.
+/// Don't use this unless you need to.
+/// If you only need a particular value, consider creating your own [`LengthFunction`].
+///
+/// **Artifact Warning:** Depending on the inner value,
+/// this can produce asymptotes that bleed across cell lines and cause artifacts.
+/// This works fine with traditional worley noise for example, but other [`WorleyMode`]s may yield harsh lines.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MinkowskiLength(pub f32);
+
+impl Default for MinkowskiLength {
+    fn default() -> Self {
+        Self(0.5)
+    }
+}
 
 macro_rules! impl_distances {
     ($t:path, $d:literal, $sqrt_d:expr) => {
@@ -134,6 +156,23 @@ macro_rules! impl_distances {
                 self.length_ordering(vec)
             }
         }
+
+        impl LengthFunction<$t> for MinkowskiLength {
+            #[inline]
+            fn max_for_element_max(&self, element_max: f32) -> f32 {
+                element_max * $d
+            }
+
+            #[inline]
+            fn length_ordering(&self, vec: $t) -> f32 {
+                vec.abs().powf(self.0).element_sum()
+            }
+
+            #[inline]
+            fn length_of(&self, vec: $t) -> f32 {
+                self.length_ordering(vec).powf(1.0 / self.0)
+            }
+        }
     };
 }
 
@@ -142,8 +181,8 @@ impl_distances!(Vec3, 3.0, 1.732_050_8);
 impl_distances!(Vec3A, 3.0, 1.732_050_8);
 impl_distances!(Vec4, 4.0, 2.0);
 
-/// A [`NoiseFunction`] that sharply jumps between values for different [`CellPoints`]s form a [`Partitioner`] `S`,
-/// where each value is from a [`NoiseFunction<u32>`] `N` where the `u32` is sourced from the nearest [`CellPoints`].
+/// A [`NoiseFunction`] that sharply jumps between values for different [`CellPoint`]s form a [`Partitioner`] `P`,
+/// where each value is from a [`NoiseFunction<u32>`] `N` where the `u32` is sourced from the nearest [`CellPoint`]s.
 /// The [`LengthFunction`] `L` is used to determine which point is nearest.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct PerNearestPoint<P, L, N> {
@@ -155,12 +194,8 @@ pub struct PerNearestPoint<P, L, N> {
     pub noise: N,
 }
 
-impl<
-    I: VectorSpace,
-    L: LengthFunction<I>,
-    P: Partitioner<I, Cell: DomainCell>,
-    N: NoiseFunction<u32>,
-> NoiseFunction<I> for PerNearestPoint<P, L, N>
+impl<I: VectorSpace, L: LengthFunction<I>, P: Partitioner<I>, N: NoiseFunction<u32>>
+    NoiseFunction<I> for PerNearestPoint<P, L, N>
 {
     type Output = N::Output;
 
@@ -177,6 +212,289 @@ impl<
             }
         }
         self.noise.evaluate(nearest_id, seeds)
+    }
+}
+
+/// A [`NoiseFunction`] partitions space by a [`Partitioner`] `S` into a [`DomainCell`] and
+/// finds the distance to the nearest voronoi edge of according to some [`LengthFunction`] `L`.
+/// The result is a unorm f32.
+///
+/// If `APPROXIMATE` is on, this will be a cheaper, approximate, discontinuous distance to edge.
+/// If you need speed, and don't care about discontinuities or exactness, turn this on.
+///
+/// **Artifact Warning:** Depending on the [`LengthFunction`] `L`, this will create artifacting.
+/// Some of the math presumes a [`EuclideanLength`]. Other lengths still work, but may artifact.
+/// This is kept generic over `L` to enable custom functions that are
+/// similar enough to euclidiean to not artifact and different enough to require a custom [`EuclideanLength`].
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct DistanceToEdge<P, L = EuclideanLength, const APPROXIMATE: bool = false> {
+    /// The [`Partitioner`].
+    pub cells: P,
+    /// The [`LengthFunction`].
+    pub length_mode: L,
+}
+
+macro_rules! impl_distance_to_edge {
+    ($t:ty) => {
+        impl<L: LengthFunction<$t>, P: Partitioner<$t, Cell: WorleyDomainCell>> NoiseFunction<$t>
+            for DistanceToEdge<P, L, true>
+        {
+            type Output = f32;
+
+            #[inline]
+            fn evaluate(&self, input: $t, seeds: &mut NoiseRng) -> Self::Output {
+                let cell = self.cells.partition(input);
+
+                let mut least_length_order = f32::INFINITY;
+                let mut least_offset = <$t>::ZERO;
+                let mut next_least_length_order = f32::INFINITY;
+                let mut next_least_offset = <$t>::ZERO;
+
+                for point in cell.iter_points(*seeds) {
+                    let length_order = self.length_mode.length_ordering(point.offset);
+                    if length_order < least_length_order {
+                        next_least_length_order = least_length_order;
+                        next_least_offset = least_offset;
+                        least_length_order = length_order;
+                        least_offset = point.offset;
+                    } else if length_order < next_least_length_order {
+                        next_least_length_order = length_order;
+                        next_least_offset = point.offset;
+                    }
+                }
+
+                let to_other_point = least_offset - next_least_offset;
+                let dir_to_other = to_other_point.normalize();
+                let nearest_traveled_towards_other = dir_to_other * dir_to_other.dot(least_offset);
+                let nearest_traveled_to_edge = to_other_point * 0.5;
+                let sample_to_this_edge = nearest_traveled_to_edge - nearest_traveled_towards_other;
+
+                let dist = self.length_mode.length_of(sample_to_this_edge);
+                let max_dits = cell.next_nearest_1d_point_always_within();
+                dist / max_dits
+            }
+        }
+
+        impl<L: LengthFunction<$t>, P: Partitioner<$t, Cell: WorleyDomainCell>> NoiseFunction<$t>
+            for DistanceToEdge<P, L, false>
+        {
+            type Output = f32;
+
+            #[inline]
+            fn evaluate(&self, input: $t, seeds: &mut NoiseRng) -> Self::Output {
+                let cell = self.cells.partition(input);
+                let mut nearest_offset = <$t>::ZERO;
+                let mut least_length_order = f32::INFINITY;
+                for point in cell.iter_points(*seeds) {
+                    let length_order = self.length_mode.length_ordering(point.offset);
+                    if length_order < least_length_order {
+                        least_length_order = length_order;
+                        nearest_offset = point.offset;
+                    }
+                }
+
+                let mut to_nearest_edge = <$t>::ZERO;
+                let mut to_nearest_edge_order = f32::INFINITY;
+                for point in cell.iter_points(*seeds) {
+                    let to_other_point = nearest_offset - point.offset;
+                    let Some(dir_to_other) = to_other_point.try_normalize() else {
+                        continue;
+                    };
+                    let nearest_traveled_towards_other =
+                        dir_to_other * dir_to_other.dot(nearest_offset);
+                    let nearest_traveled_to_edge = to_other_point * 0.5;
+                    let sample_to_this_edge =
+                        nearest_traveled_to_edge - nearest_traveled_towards_other;
+
+                    let order = self.length_mode.length_ordering(sample_to_this_edge);
+                    if order < to_nearest_edge_order {
+                        to_nearest_edge_order = order;
+                        to_nearest_edge = sample_to_this_edge;
+                    }
+                }
+
+                let dist = self.length_mode.length_of(to_nearest_edge);
+                let max_dits = cell.nearest_1d_point_always_within();
+                dist / max_dits
+            }
+        }
+    };
+}
+
+impl_distance_to_edge!(Vec2);
+impl_distance_to_edge!(Vec3);
+impl_distance_to_edge!(Vec3A);
+impl_distance_to_edge!(Vec4);
+
+/// Represents a way to compute worley noise, noise based on the distances of the two nearest [`CellPoints`]s to the sample point.
+pub trait WorleyMode {
+    /// Evaluates the result of this worley mode with the these distances to the `nearest` and `next_nearest` [`CellPoints`]s.
+    fn evaluate_worley(
+        &self,
+        nearest: f32,
+        max_nearest: f32,
+        next_nearest: f32,
+        max_next_nearest: f32,
+    ) -> f32;
+}
+
+/// A [`WorleyMode`] that returns the unorm distance to the nearest [`CellPoint`].
+/// This is traditional worley noise.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WorleyPointDistance;
+
+impl WorleyMode for WorleyPointDistance {
+    #[inline]
+    fn evaluate_worley(
+        &self,
+        nearest: f32,
+        max_nearest: f32,
+        _next_nearest: f32,
+        _max_next_nearest: f32,
+    ) -> f32 {
+        nearest / max_nearest
+    }
+}
+
+/// A [`WorleyMode`] that returns the unorm distance to the second nearest [`CellPoint`].
+/// This will have artifacts when using `HALF_SCALE` on [`Voronoi`](crate::cells::Voronoi).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WorleySecondPointDistance;
+
+impl WorleyMode for WorleySecondPointDistance {
+    #[inline]
+    fn evaluate_worley(
+        &self,
+        _nearest: f32,
+        _max_nearest: f32,
+        next_nearest: f32,
+        max_next_nearest: f32,
+    ) -> f32 {
+        next_nearest / max_next_nearest
+    }
+}
+
+/// A [`WorleyMode`] that returns the unorm difference between the first and second nearest [`CellPoint`].
+/// This will have artifacts when using `HALF_SCALE` on [`Voronoi`](crate::cells::Voronoi).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WorleyDifference;
+
+impl WorleyMode for WorleyDifference {
+    #[inline]
+    fn evaluate_worley(
+        &self,
+        nearest: f32,
+        _max_nearest: f32,
+        next_nearest: f32,
+        max_next_nearest: f32,
+    ) -> f32 {
+        (next_nearest - nearest) / max_next_nearest
+    }
+}
+
+/// A [`WorleyMode`] that returns the unorm average of the first and second nearest [`CellPoint`].
+/// This will have artifacts when using `HALF_SCALE` on [`Voronoi`](crate::cells::Voronoi).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WorleyAverage;
+
+impl WorleyMode for WorleyAverage {
+    #[inline]
+    fn evaluate_worley(
+        &self,
+        nearest: f32,
+        max_nearest: f32,
+        next_nearest: f32,
+        max_next_nearest: f32,
+    ) -> f32 {
+        (next_nearest / max_next_nearest + nearest / max_nearest) * 0.5
+    }
+}
+
+/// A [`WorleyMode`] that returns the unorm product between the first and second nearest [`CellPoint`].
+/// This will have artifacts when using `HALF_SCALE` on [`Voronoi`](crate::cells::Voronoi).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WorleyProduct;
+
+impl WorleyMode for WorleyProduct {
+    #[inline]
+    fn evaluate_worley(
+        &self,
+        nearest: f32,
+        max_nearest: f32,
+        next_nearest: f32,
+        max_next_nearest: f32,
+    ) -> f32 {
+        (next_nearest * nearest) / (max_nearest * max_next_nearest)
+    }
+}
+
+/// A [`WorleyMode`] that returns the unorm ratio between the first and second nearest [`CellPoint`].
+/// This will have artifacts when using `HALF_SCALE` on [`Voronoi`](crate::cells::Voronoi).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WorleyRatio;
+
+impl WorleyMode for WorleyRatio {
+    #[inline]
+    fn evaluate_worley(
+        &self,
+        nearest: f32,
+        _max_nearest: f32,
+        next_nearest: f32,
+        _max_next_nearest: f32,
+    ) -> f32 {
+        // For this to be a division by zero, the points would need to be ontop of eachother, which is impossible.
+        nearest / next_nearest
+    }
+}
+
+/// A [`NoiseFunction`] that partitions space by some [`Partitioner`] `P` into [`DomainCell`],
+/// finds the distance to each [`CellPoints`]s relevant to that cell via a [`LengthFunction`] `L`,
+/// and then provides those distances to some [`WorleyMode`] `M`.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct PerLeastDistances<P, L, W> {
+    /// The [`Partitioner`].
+    pub cells: P,
+    /// The [`LengthFunction`].
+    pub length_mode: L,
+    /// The [`WorleyMode`].
+    pub worley_mode: W,
+}
+
+impl<I: VectorSpace, L: LengthFunction<I>, P: Partitioner<I, Cell: WorleyDomainCell>, W: WorleyMode>
+    NoiseFunction<I> for PerLeastDistances<P, L, W>
+{
+    type Output = f32;
+
+    #[inline]
+    fn evaluate(&self, input: I, seeds: &mut NoiseRng) -> Self::Output {
+        let cell = self.cells.partition(input);
+
+        let mut least_length_order = f32::INFINITY;
+        let mut least_length_offset = I::ZERO;
+        let mut next_least_length_order = f32::INFINITY;
+        let mut next_least_length_offset = I::ZERO;
+
+        for point in cell.iter_points(*seeds) {
+            let length_order = self.length_mode.length_ordering(point.offset);
+            if length_order < least_length_order {
+                next_least_length_order = least_length_order;
+                next_least_length_offset = least_length_offset;
+                least_length_order = length_order;
+                least_length_offset = point.offset;
+            } else if length_order < next_least_length_order {
+                next_least_length_order = length_order;
+                next_least_length_offset = point.offset;
+            }
+        }
+
+        self.worley_mode.evaluate_worley(
+            self.length_mode.length_of(least_length_offset),
+            self.length_mode
+                .max_for_element_max(cell.nearest_1d_point_always_within()),
+            self.length_mode.length_of(next_least_length_offset),
+            self.length_mode
+                .max_for_element_max(cell.next_nearest_1d_point_always_within()),
+        )
     }
 }
 
