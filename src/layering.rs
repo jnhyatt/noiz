@@ -1,9 +1,9 @@
 //! Contains logic for layering different noise ontop of eachother.
 
-use core::{marker::PhantomData, ops::Div};
+use core::{f32, marker::PhantomData, ops::Div};
 
-use crate::*;
-use bevy_math::VectorSpace;
+use crate::{cell_noise::LengthFunction, cells::WithGradient, *};
+use bevy_math::{Curve, Vec2, Vec3, Vec3A, Vec4, VectorSpace};
 use rng::NoiseRng;
 
 /// This represents the context of some [`NoiseResult`].
@@ -201,7 +201,7 @@ impl<T, R: LayerResultContext, W: LayerWeights> LayerOperation<R, W> for Octave<
 }
 
 impl<
-    T: NoiseFunction<I, Output: VectorSpace>,
+    T: NoiseFunction<I>,
     I: VectorSpace,
     R: LayerResultContext<Result: LayerResultFor<T::Output>>,
     W: LayerWeights,
@@ -415,5 +415,219 @@ where
     #[inline]
     fn include_value(&mut self, value: I, weight: f32) {
         self.running_total = self.running_total + (value.into() * weight);
+    }
+}
+
+/// This will normalize the results into a whieghted average where the derivatives affect the weight.
+///
+/// `T` is the [`VectorSpace`] you want to collect.
+/// `L` is the [`LengthFunction`] to calculate the derivative from the gradient.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NormedByDerivative<T, L, C> {
+    /// The [`LengthFunction`] to calculate the derivative from the gradient.
+    pub derivative_calculator: L,
+    /// The [`Curve`] to calculate the the contribution for a derivative.
+    pub derivative_contribution: C,
+    /// A value representing how quickly large derivatives are suppressed.
+    /// Negative values are meaningless.
+    pub derivative_falloff: f32,
+    marker: PhantomData<T>,
+    total_weights: f32,
+}
+
+impl<T: VectorSpace, L: Default, C: Default> Default for NormedByDerivative<T, L, C> {
+    fn default() -> Self {
+        Self {
+            marker: PhantomData,
+            total_weights: 0.0,
+            derivative_calculator: L::default(),
+            derivative_contribution: C::default(),
+            derivative_falloff: 1.0,
+        }
+    }
+}
+
+impl<T: VectorSpace, L, C> NormedByDerivative<T, L, C> {
+    /// Sets [`NormedByDerivative::derivative_falloff`].
+    pub fn with_falloff(mut self, derivative_falloff: f32) -> Self {
+        self.derivative_falloff = derivative_falloff;
+        self
+    }
+}
+
+impl<T: VectorSpace, L: Copy, C: Copy> LayerResultContext for NormedByDerivative<T, L, C>
+where
+    NormedResult<T>: LayerResult,
+{
+    type Result = NormedByDerivativeResult<T, L, C>;
+
+    #[inline]
+    fn expect_weight(&mut self, weight: f32) {
+        self.total_weights += weight;
+    }
+
+    #[inline]
+    fn start_result(&self) -> Self::Result {
+        NormedByDerivativeResult {
+            total_weights: self.total_weights,
+            running_total: T::ZERO,
+            running_derivative: Vec4::ZERO,
+            derivative_calculator: self.derivative_calculator,
+            derivative_contribution: self.derivative_contribution,
+            derivative_falloff: self.derivative_falloff,
+        }
+    }
+}
+
+/// The in-progress result of a [`NormedByDerivative`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NormedByDerivativeResult<T, L, C> {
+    total_weights: f32,
+    running_total: T,
+    running_derivative: Vec4,
+    derivative_calculator: L,
+    derivative_contribution: C,
+    derivative_falloff: f32,
+}
+
+impl<T: Div<f32>, L, C> LayerResult for NormedByDerivativeResult<T, L, C> {
+    type Output = T::Output;
+
+    #[inline]
+    fn add_unexpected_weight_to_total(&mut self, weight: f32) {
+        self.total_weights += weight;
+    }
+
+    #[inline]
+    fn finish(self, _rng: &mut NoiseRng) -> Self::Output {
+        self.running_total / self.total_weights
+    }
+}
+
+impl<T: VectorSpace, L, C> LayerResultFor<T> for NormedByDerivativeResult<T, L, C>
+where
+    Self: LayerResult,
+{
+    #[inline]
+    fn include_value(&mut self, value: T, weight: f32) {
+        self.running_total = self.running_total + (value * weight);
+    }
+}
+
+/// This is effectively `Into<Vec4>` where any missing elements are left 0.
+pub trait DerivativeConvert {
+    /// Converts to 4d, leaving missing dimensions 0.
+    fn into_4d(self) -> Vec4;
+}
+
+impl DerivativeConvert for Vec2 {
+    #[inline]
+    fn into_4d(self) -> Vec4 {
+        self.extend(0.0).extend(0.0)
+    }
+}
+
+impl DerivativeConvert for Vec3 {
+    #[inline]
+    fn into_4d(self) -> Vec4 {
+        self.extend(0.0)
+    }
+}
+
+impl DerivativeConvert for Vec3A {
+    #[inline]
+    fn into_4d(self) -> Vec4 {
+        self.extend(0.0)
+    }
+}
+
+impl DerivativeConvert for Vec4 {
+    #[inline]
+    fn into_4d(self) -> Vec4 {
+        self
+    }
+}
+
+impl DerivativeConvert for f32 {
+    #[inline]
+    fn into_4d(self) -> Vec4 {
+        Vec4::new(self, 0.0, 0.0, 0.0)
+    }
+}
+
+impl DerivativeConvert for [f32; 2] {
+    #[inline]
+    fn into_4d(self) -> Vec4 {
+        Vec4::new(self[0], self[1], 0.0, 0.0)
+    }
+}
+
+impl DerivativeConvert for [f32; 3] {
+    #[inline]
+    fn into_4d(self) -> Vec4 {
+        Vec4::new(self[0], self[1], self[2], 0.0)
+    }
+}
+
+impl DerivativeConvert for [f32; 4] {
+    #[inline]
+    fn into_4d(self) -> Vec4 {
+        self.into()
+    }
+}
+
+impl<T: VectorSpace, I: Into<T>, G: DerivativeConvert, L: LengthFunction<Vec4>, C: Curve<f32>>
+    LayerResultFor<WithGradient<I, G>> for NormedByDerivativeResult<T, L, C>
+where
+    Self: LayerResult,
+{
+    #[inline]
+    fn include_value(&mut self, value: WithGradient<I, G>, weight: f32) {
+        self.running_derivative += value.gradient.into_4d();
+        let total_derivative = self
+            .derivative_calculator
+            .length_of(self.running_derivative);
+        let additional_weight = self
+            .derivative_contribution
+            .sample_unchecked(total_derivative * self.derivative_falloff);
+        self.running_total = self.running_total + value.value.into() * (weight * additional_weight);
+    }
+}
+
+/// A [`Curve`] designed for [`NormedByDerivatie`] that decreases from 1 to 0 for positive values.
+/// This produces sharper high values.
+///
+/// This is a fast, good default option.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PeakDerivativeContribution;
+
+impl Curve<f32> for PeakDerivativeContribution {
+    #[inline]
+    fn domain(&self) -> bevy_math::curve::Interval {
+        // SAFETY: nothing is greater than infinity.
+        unsafe { bevy_math::curve::Interval::new(0.0, f32::INFINITY).unwrap_unchecked() }
+    }
+
+    #[inline]
+    fn sample_unchecked(&self, t: f32) -> f32 {
+        1.0 / (1.0 + t)
+    }
+}
+
+/// A [`Curve`] designed for [`NormedByDerivatie`] that decreases from 1 to 0 for positive values.
+/// This produces more rounded high values.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SmoothDerivativeContribution;
+
+impl Curve<f32> for SmoothDerivativeContribution {
+    #[inline]
+    fn domain(&self) -> bevy_math::curve::Interval {
+        // SAFETY: nothing is greater than infinity.
+        unsafe { bevy_math::curve::Interval::new(0.0, f32::INFINITY).unwrap_unchecked() }
+    }
+
+    #[inline]
+    fn sample_unchecked(&self, t: f32) -> f32 {
+        1.0 / (1.0 + t)
     }
 }
