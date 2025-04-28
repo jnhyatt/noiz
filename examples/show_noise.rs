@@ -17,7 +17,7 @@ use noiz::{
     common_adapters::SNormToUNorm,
     curves::{CubicSMin, Linear, Smoothstep},
     layering::{DomainWarp, FractalOctaves, LayeredNoise, Normed, Octave, Persistence},
-    misc_noise::{Offset, RandomElements},
+    misc_noise::{Offset, Peeled, RandomElements, SelfMasked},
     rng::{Random, SNorm, UNorm},
 };
 
@@ -391,6 +391,77 @@ fn main() -> AppExit {
                                 BlendCellGradients<Voronoi, SimplecticBlend, QuickGradients>,
                                 SNormToUNorm,
                             )>::default()),
+                        },
+                        NoiseOption {
+                            name: "Masked Fractal Simplex noise",
+                            noise: Box::new(Noise::<
+                                SelfMasked<(
+                                    LayeredNoise<
+                                        Normed<f32>,
+                                        Persistence,
+                                        FractalOctaves<
+                                            Octave<
+                                                BlendCellGradients<
+                                                    SimplexGrid,
+                                                    SimplecticBlend,
+                                                    QuickGradients,
+                                                >,
+                                            >,
+                                        >,
+                                    >,
+                                    SNormToUNorm,
+                                )>,
+                            >::from(SelfMasked((
+                                LayeredNoise::new(
+                                    Normed::default(),
+                                    Persistence(0.6),
+                                    FractalOctaves {
+                                        octave: Default::default(),
+                                        lacunarity: 1.8,
+                                        octaves: 8,
+                                    },
+                                ),
+                                Default::default(),
+                            )))),
+                        },
+                        NoiseOption {
+                            name: "Pealed noise",
+                            noise: Box::new(Noise::<
+                                Peeled<
+                                    (
+                                        LayeredNoise<
+                                            Normed<f32>,
+                                            Persistence,
+                                            FractalOctaves<
+                                                Octave<
+                                                    BlendCellGradients<
+                                                        SimplexGrid,
+                                                        SimplecticBlend,
+                                                        QuickGradients,
+                                                    >,
+                                                >,
+                                            >,
+                                        >,
+                                        SNormToUNorm,
+                                    ),
+                                    MixCellGradients<OrthoGrid, Smoothstep, QuickGradients>,
+                                >,
+                            >::from(Peeled {
+                                noise: (
+                                    LayeredNoise::new(
+                                        Normed::default(),
+                                        Persistence(0.6),
+                                        FractalOctaves {
+                                            octave: Default::default(),
+                                            lacunarity: 1.8,
+                                            octaves: 8,
+                                        },
+                                    ),
+                                    Default::default(),
+                                ),
+                                pealer: MixCellGradients::default(),
+                                layers: 5.0,
+                            })),
                         },
                     ],
                     selected: 0,
