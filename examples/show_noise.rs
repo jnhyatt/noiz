@@ -11,12 +11,12 @@ use noiz::{
     cell_noise::{
         BlendCellGradients, BlendCellValues, ChebyshevLength, DistanceBlend, DistanceToEdge,
         EuclideanLength, ManhatanLength, MixCellGradients, MixCellValues, PerCell,
-        PerLeastDistances, PerNearestPoint, QualityGradients, QuickGradients, SimplecticBlend,
-        WorleyAverage, WorleyDifference, WorleyPointDistance,
+        PerCellPointDistances, PerNearestPoint, QualityGradients, QuickGradients, SimplecticBlend,
+        WorleyAverage, WorleyDifference, WorleyPointDistance, WorleySmoothMin,
     },
     cells::{OrthoGrid, SimplexGrid, Voronoi},
     common_adapters::SNormToUNorm,
-    curves::{Linear, Smoothstep},
+    curves::{CubicSMin, Linear, Smoothstep},
     rng::{Random, UNorm},
 };
 
@@ -210,13 +210,27 @@ fn main() -> AppExit {
                         NoiseOption {
                             name: "Worley noise",
                             noise: Box::new(Noise::<
-                                PerLeastDistances<Voronoi, EuclideanLength, WorleyPointDistance>,
+                                PerCellPointDistances<
+                                    Voronoi,
+                                    EuclideanLength,
+                                    WorleyPointDistance,
+                                >,
+                            >::default()),
+                        },
+                        NoiseOption {
+                            name: "Smooth Worley noise",
+                            noise: Box::new(Noise::<
+                                PerCellPointDistances<
+                                    Voronoi,
+                                    EuclideanLength,
+                                    WorleySmoothMin<CubicSMin>,
+                                >,
                             >::default()),
                         },
                         NoiseOption {
                             name: "Worley difference",
                             noise: Box::new(Noise::<
-                                PerLeastDistances<Voronoi, EuclideanLength, WorleyDifference>,
+                                PerCellPointDistances<Voronoi, EuclideanLength, WorleyDifference>,
                             >::default()),
                         },
                         NoiseOption {
@@ -226,7 +240,7 @@ fn main() -> AppExit {
                         NoiseOption {
                             name: "Wacky Worley noise",
                             noise: Box::new(Noise::<
-                                PerLeastDistances<Voronoi, ChebyshevLength, WorleyAverage>,
+                                PerCellPointDistances<Voronoi, ChebyshevLength, WorleyAverage>,
                             >::default()),
                         },
                         NoiseOption {
