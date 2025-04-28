@@ -12,9 +12,10 @@ use bevy_math::{
 use crate::{
     NoiseFunction,
     cells::{
-        DiferentiableCell, DomainCell, InterpolatableCell, Partitioner, WithGradient,
-        WorleyDomainCell,
+        BlendableDomainCell, DiferentiableCell, DomainCell, InterpolatableCell, Partitioner,
+        WithGradient, WorleyDomainCell,
     },
+    curves::Smoothstep,
     rng::{AnyValueFromBits, ConcreteAnyValueFromBits, NoiseRng, SNormSplit, UNorm},
 };
 
@@ -51,6 +52,10 @@ pub trait LengthFunction<T: VectorSpace> {
 /// A [`LengthFunction`] and for "as the crow flyies" length
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct EuclideanLength;
+
+/// A [`LengthFunction`] and for squared [`EuclideanLength`] length
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct EuclideanSqrdLength;
 
 /// A [`LengthFunction`] and for "manhatan" or diagonal length
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -101,6 +106,23 @@ macro_rules! impl_distances {
             #[inline]
             fn length_of(&self, vec: $t) -> f32 {
                 self.length_ordering(vec).sqrt()
+            }
+        }
+
+        impl LengthFunction<$t> for EuclideanSqrdLength {
+            #[inline]
+            fn max_for_element_max(&self, element_max: f32) -> f32 {
+                element_max * element_max * $d
+            }
+
+            #[inline]
+            fn length_ordering(&self, vec: $t) -> f32 {
+                vec.length_squared()
+            }
+
+            #[inline]
+            fn length_of(&self, vec: $t) -> f32 {
+                self.length_ordering(vec)
             }
         }
 
@@ -557,18 +579,14 @@ impl<
 
 /// Allows blending between different [`CellPoint`](crate::cells::CellPoint)s.
 pub trait Blender<I: VectorSpace, V> {
-    /// Weighs the `value` by the offset of the sampled point to the point that generated the value.
-    ///
-    /// Usually this will scale the `value` bassed on the length of `offset`.
-    fn weigh_value(&self, value: V, offset: I) -> V;
+    /// Blends together each value `V` of `to_blend` according to some weight `I`, where weights beyond the range of `blending_half_radius` are ignored.
+    /// `blending_half_radius` cuts off the blend before it hits discontinuities.
+    fn blend(&self, to_blend: impl Iterator<Item = (V, I)>, blending_half_radius: f32) -> V;
 
     /// When the value is computed as the dot product of the `offset` passed to [`weigh_value`](Blender::weigh_value), the value is already weighted to some extent.
     /// This counteracts that weight by opperating on the already weighted value.
     /// Assuming the collected value was the dot of some vec `a` with this `offset`, this will map the value into `±|a|`
-    fn counter_dot_product(&self, value: V) -> V;
-
-    /// Given some weighted values, combines them into one, performing any final actions needed.
-    fn collect_weighted(&self, weighed: impl Iterator<Item = V>) -> V;
+    fn counter_dot_product(&self, value: V, blending_half_radius: f32) -> V;
 }
 
 /// A [`NoiseFunction`] that blends values sourced from a [`FastRandomMixed`] `N` by a [`Blender`] `B` within some [`DomainCell`] form a [`Partitioner`] `P`.
@@ -582,26 +600,30 @@ pub struct BlendCellValues<P, B, N, const DIFFERENTIATE: bool = false> {
     pub blender: B,
 }
 
-impl<I: VectorSpace, P: Partitioner<I>, B: Blender<I, N::Concrete>, N: ConcreteAnyValueFromBits>
-    NoiseFunction<I> for BlendCellValues<P, B, N, false>
+impl<
+    I: VectorSpace,
+    P: Partitioner<I, Cell: BlendableDomainCell>,
+    B: Blender<I, N::Concrete>,
+    N: ConcreteAnyValueFromBits,
+> NoiseFunction<I> for BlendCellValues<P, B, N, false>
 {
     type Output = N::Concrete;
 
     #[inline]
     fn evaluate(&self, input: I, seeds: &mut NoiseRng) -> Self::Output {
-        let segment = self.cells.partition(input);
-        let weighted = segment.iter_points(*seeds).map(|p| {
+        let cell = self.cells.partition(input);
+        let to_blend = cell.iter_points(*seeds).map(|p| {
             // We can't use the `linear_equivalent_value` because the blend type is not linear.
             let value = self.noise.any_value(p.rough_id);
-            self.blender.weigh_value(value, p.offset)
+            (value, p.offset)
         });
-        self.blender.collect_weighted(weighted)
+        self.blender.blend(to_blend, cell.blending_half_radius())
     }
 }
 
 impl<
     I: VectorSpace,
-    P: Partitioner<I>,
+    P: Partitioner<I, Cell: BlendableDomainCell>,
     B: Blender<I, WithGradient<N::Concrete, I>>,
     N: ConcreteAnyValueFromBits,
 > NoiseFunction<I> for BlendCellValues<P, B, N, true>
@@ -610,11 +632,11 @@ impl<
 
     #[inline]
     fn evaluate(&self, input: I, seeds: &mut NoiseRng) -> Self::Output {
-        let segment = self.cells.partition(input);
-        let weighted = segment.iter_points(*seeds).map(|p| {
+        let cell = self.cells.partition(input);
+        let to_blend = cell.iter_points(*seeds).map(|p| {
             let value = self.noise.any_value(p.rough_id);
             // TODO: Verify that this gradient is correct. Does the blender naturally do this correctly?
-            self.blender.weigh_value(
+            (
                 WithGradient {
                     value,
                     gradient: -p.offset,
@@ -622,7 +644,7 @@ impl<
                 p.offset,
             )
         });
-        self.blender.collect_weighted(weighted)
+        self.blender.blend(to_blend, cell.blending_half_radius())
     }
 }
 
@@ -715,26 +737,31 @@ pub struct BlendCellGradients<P, B, G, const DIFFERENTIATE: bool = false> {
     pub blender: B,
 }
 
-impl<I: VectorSpace, P: Partitioner<I>, B: Blender<I, f32>, G: GradientGenerator<I>>
-    NoiseFunction<I> for BlendCellGradients<P, B, G, false>
+impl<
+    I: VectorSpace,
+    P: Partitioner<I, Cell: BlendableDomainCell>,
+    B: Blender<I, f32>,
+    G: GradientGenerator<I>,
+> NoiseFunction<I> for BlendCellGradients<P, B, G, false>
 {
     type Output = f32;
 
     #[inline]
     fn evaluate(&self, input: I, seeds: &mut NoiseRng) -> Self::Output {
-        let segment = self.cells.partition(input);
-        let weighted = segment.iter_points(*seeds).map(|p| {
+        let cell = self.cells.partition(input);
+        let to_blend = cell.iter_points(*seeds).map(|p| {
             let dot = self.gradients.get_gradient_dot(p.rough_id, p.offset);
-            self.blender.weigh_value(dot, p.offset)
+            (dot, p.offset)
         });
+        let radius = cell.blending_half_radius();
         self.blender
-            .counter_dot_product(self.blender.collect_weighted(weighted))
+            .counter_dot_product(self.blender.blend(to_blend, radius), radius)
     }
 }
 
 impl<
     I: VectorSpace,
-    P: Partitioner<I>,
+    P: Partitioner<I, Cell: BlendableDomainCell>,
     B: Blender<I, WithGradient<f32, I>>,
     G: GradientGenerator<I>,
 > NoiseFunction<I> for BlendCellGradients<P, B, G, true>
@@ -743,11 +770,11 @@ impl<
 
     #[inline]
     fn evaluate(&self, input: I, seeds: &mut NoiseRng) -> Self::Output {
-        let segment = self.cells.partition(input);
-        let weighted = segment.iter_points(*seeds).map(|p| {
+        let cell = self.cells.partition(input);
+
+        let to_blend = cell.iter_points(*seeds).map(|p| {
             let dot = self.gradients.get_gradient_dot(p.rough_id, p.offset);
-            // TODO: Verify that this gradient is correct. Does the blender naturally do this correctly?
-            self.blender.weigh_value(
+            (
                 WithGradient {
                     value: dot,
                     gradient: -p.offset,
@@ -755,8 +782,9 @@ impl<
                 p.offset,
             )
         });
+        let radius = cell.blending_half_radius();
         self.blender
-            .counter_dot_product(self.blender.collect_weighted(weighted))
+            .counter_dot_product(self.blender.blend(to_blend, radius), radius)
     }
 }
 
@@ -939,19 +967,68 @@ impl GradientGenerator<Vec3A> for QualityGradients {
     }
 }
 
-/// A [`Blender`] for [`SimplexGrid`](crate::cells::SimplexGrid).
+/// A [`Blender`] that weighs each values by it's distance, as computed by a [`LengthFunction`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DistanceBlend<L>(pub L);
+
+impl<V: Mul<f32, Output = V> + Default + AddAssign<V>, L: LengthFunction<I>, I: VectorSpace>
+    Blender<I, V> for DistanceBlend<L>
+{
+    #[inline]
+    fn blend(&self, to_blend: impl Iterator<Item = (V, I)>, blending_half_radius: f32) -> V {
+        let mut sum = V::default();
+        let mut weight_sum = 0f32;
+        let mut cnt = 0;
+        let clamp_len = self.0.max_for_element_max(blending_half_radius);
+        for (val, weight) in to_blend {
+            let len = self.0.length_of(weight);
+            let weight = Smoothstep.sample_unchecked((clamp_len - len).max(0.0) / clamp_len);
+            sum += val * weight;
+            weight_sum += weight;
+            cnt += 1;
+        }
+        sum * (weight_sum / (cnt as f32 * clamp_len))
+    }
+
+    #[inline]
+    fn counter_dot_product(&self, value: V, _blending_half_radius: f32) -> V {
+        value
+    }
+}
+
+/// A [`Blender`] defers to another [`Blender`] `T` and scales its blending radius by some value.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct LocalBlend<T> {
+    /// The inner [`Blender`].
+    pub blender: T,
+    /// The scale of the blending radius.
+    /// Values in (0, 1) will decrease the blending, producing more localized values.
+    /// Values higher than 1 will produce discontinuities.
+    /// Negative values have no meaning (and may have either no effect or look really cool/strange).
+    pub radius_scale: f32,
+}
+
+impl<V, I: VectorSpace, B: Blender<I, V>> Blender<I, V> for LocalBlend<B> {
+    #[inline]
+    fn blend(&self, to_blend: impl Iterator<Item = (V, I)>, blending_half_radius: f32) -> V {
+        self.blender
+            .blend(to_blend, blending_half_radius * self.radius_scale)
+    }
+
+    #[inline]
+    fn counter_dot_product(&self, value: V, blending_half_radius: f32) -> V {
+        self.blender
+            .counter_dot_product(value, blending_half_radius)
+    }
+}
+
+/// A [`Blender`] built for [`SimplexGrid`](crate::cells::SimplexGrid) that smoothly blends values in a pleasant way.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SimplecticBlend;
 
-const SIMPLECTIC_R_SQUARED: f32 = 0.5;
-const SIMPLECTIC_R_EFFECT: f32 = (1.0 / SIMPLECTIC_R_SQUARED)
-    * (1.0 / SIMPLECTIC_R_SQUARED)
-    * (1.0 / SIMPLECTIC_R_SQUARED)
-    * (1.0 / SIMPLECTIC_R_SQUARED);
-
-fn general_simplex_weight(length_sqrd: f32) -> f32 {
+fn general_simplex_weight(length_sqrd: f32, blending_half_radius: f32) -> f32 {
     // We do the unorm mapping here instead of later to prevent precision issues.
-    let weight_unorm = (SIMPLECTIC_R_SQUARED - length_sqrd) * (1.0 / SIMPLECTIC_R_SQUARED);
+    let weight_unorm = (blending_half_radius - length_sqrd) / blending_half_radius;
     if weight_unorm <= 0.0 {
         0.0
     } else {
@@ -962,84 +1039,68 @@ fn general_simplex_weight(length_sqrd: f32) -> f32 {
 
 impl<V: Mul<f32, Output = V> + Default + AddAssign<V>> Blender<Vec2, V> for SimplecticBlend {
     #[inline]
-    fn weigh_value(&self, value: V, offset: Vec2) -> V {
-        value * general_simplex_weight(offset.length_squared())
-    }
-
-    #[inline]
-    fn collect_weighted(&self, weighed: impl Iterator<Item = V>) -> V {
+    fn blend(&self, to_blend: impl Iterator<Item = (V, Vec2)>, blending_half_radius: f32) -> V {
         let mut sum = V::default();
-        for v in weighed {
-            sum += v;
+        for (val, weight) in to_blend {
+            sum += val * general_simplex_weight(weight.length_squared(), blending_half_radius);
         }
         sum
     }
 
     #[inline]
-    fn counter_dot_product(&self, value: V) -> V {
-        value * (99.836_85 / SIMPLECTIC_R_EFFECT) // adapted from libnoise
+    fn counter_dot_product(&self, value: V, blending_half_radius: f32) -> V {
+        let sqr = blending_half_radius * blending_half_radius;
+        value * (99.836_85 * sqr * sqr) // adapted from libnoise
     }
 }
 
 impl<V: Mul<f32, Output = V> + Default + AddAssign<V>> Blender<Vec3, V> for SimplecticBlend {
     #[inline]
-    fn weigh_value(&self, value: V, offset: Vec3) -> V {
-        value * general_simplex_weight(offset.length_squared())
-    }
-
-    #[inline]
-    fn collect_weighted(&self, weighed: impl Iterator<Item = V>) -> V {
+    fn blend(&self, to_blend: impl Iterator<Item = (V, Vec3)>, blending_half_radius: f32) -> V {
         let mut sum = V::default();
-        for v in weighed {
-            sum += v;
+        for (val, weight) in to_blend {
+            sum += val * general_simplex_weight(weight.length_squared(), blending_half_radius);
         }
         sum
     }
 
     #[inline]
-    fn counter_dot_product(&self, value: V) -> V {
-        value * (76.883_76 / SIMPLECTIC_R_EFFECT) // adapted from libnoise
+    fn counter_dot_product(&self, value: V, blending_half_radius: f32) -> V {
+        let sqr = blending_half_radius * blending_half_radius;
+        value * (76.883_76 * sqr * sqr) // adapted from libnoise
     }
 }
 
 impl<V: Mul<f32, Output = V> + Default + AddAssign<V>> Blender<Vec3A, V> for SimplecticBlend {
     #[inline]
-    fn weigh_value(&self, value: V, offset: Vec3A) -> V {
-        value * general_simplex_weight(offset.length_squared())
-    }
-
-    #[inline]
-    fn collect_weighted(&self, weighed: impl Iterator<Item = V>) -> V {
+    fn blend(&self, to_blend: impl Iterator<Item = (V, Vec3A)>, blending_half_radius: f32) -> V {
         let mut sum = V::default();
-        for v in weighed {
-            sum += v;
+        for (val, weight) in to_blend {
+            sum += val * general_simplex_weight(weight.length_squared(), blending_half_radius);
         }
         sum
     }
 
     #[inline]
-    fn counter_dot_product(&self, value: V) -> V {
-        value * (76.883_76 / SIMPLECTIC_R_EFFECT) // adapted from libnoise
+    fn counter_dot_product(&self, value: V, blending_half_radius: f32) -> V {
+        let sqr = blending_half_radius * blending_half_radius;
+        value * (76.883_76 * sqr * sqr) // adapted from libnoise
     }
 }
 
 impl<V: Mul<f32, Output = V> + Default + AddAssign<V>> Blender<Vec4, V> for SimplecticBlend {
     #[inline]
-    fn weigh_value(&self, value: V, offset: Vec4) -> V {
-        value * general_simplex_weight(offset.length_squared())
-    }
-
-    #[inline]
-    fn collect_weighted(&self, weighed: impl Iterator<Item = V>) -> V {
+    fn blend(&self, to_blend: impl Iterator<Item = (V, Vec4)>, blending_half_radius: f32) -> V {
         let mut sum = V::default();
-        for v in weighed {
-            sum += v;
+        for (val, weight) in to_blend {
+            sum += val * general_simplex_weight(weight.length_squared(), blending_half_radius);
         }
         sum
     }
 
     #[inline]
-    fn counter_dot_product(&self, value: V) -> V {
-        value * (62.795_597 / SIMPLECTIC_R_EFFECT) // adapted from libnoise
+    fn counter_dot_product(&self, value: V, blending_half_radius: f32) -> V {
+        let sqr = blending_half_radius * blending_half_radius;
+        value * (62.795_597 * sqr * sqr) // adapted from libnoise
     }
 }
