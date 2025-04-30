@@ -3,16 +3,16 @@
 pub use crate::{
     ConfigurableNoise, DynamicSampleable, Noise, NoiseFunction, Sampleable, SampleableFor,
     cell_noise::{
-        BlendCellGradients, BlendCellValues, DistanceBlend, EuclideanLength, ManhatanLength,
-        MixCellGradients, MixCellValues, PerCell, PerCellPointDistances, QuickGradients,
-        SimplecticBlend, WorleyPointDistance,
+        BlendCellGradients, BlendCellValues, DistanceBlend, MixCellGradients, MixCellValues,
+        PerCell, PerCellPointDistances, QuickGradients, SimplecticBlend, WorleyPointDistance,
     },
     cells::{OrthoGrid, SimplexGrid, Voronoi},
     curves::{DoubleSmoothstep, Linear, Smoothstep},
     layering::{
-        FractalOctaves, LayeredNoise, Normed, NormedByDerivative, Octave,
+        FractalLayers, LayeredNoise, Normed, NormedByDerivative, Octave,
         PeakDerivativeContribution, Persistence,
     },
+    lengths::{EuclideanLength, ManhatanLength},
     math_noise::{Billow, PingPong, SNormToUNorm, UNormToSNorm},
     rng::{Random, SNorm, UNorm},
 };
@@ -33,4 +33,7 @@ pub mod common_noise {
 
     /// A [`NoiseFunction`] that produces simplex noise `f32`s between -1 and 1.
     pub type Simplex = BlendCellGradients<SimplexGrid, SimplecticBlend, QuickGradients>;
+
+    /// Represents traditional fractal brownian motion.
+    pub type Fbm<T> = LayeredNoise<Normed<f32>, Persistence, FractalLayers<Octave<T>>>;
 }

@@ -3,7 +3,7 @@
 ![License](https://img.shields.io/badge/license-MIT%2FApache-blue.svg)
 [![CI](https://github.com/ElliottjPierce/noiz/workflows/CI/badge.svg)](https://github.com/ElliottjPierce/noiz/actions)
 
-A simple noise library built for and with [Bevy](https://bevyengine.org/).
+A simple, configurable, blazingly fast noise library built for and with [Bevy](https://bevyengine.org/).
 
 Here's some fbm simplex noise as a taste:
 ![FbmSimplex](images/FbmSimplex.png)
@@ -38,6 +38,8 @@ Noiz is not:
 - Noiz is endlessly cusomizable. Really, the combinations and settings are limitless!
 - Noiz is `no_std`.
 - Noiz supports all your favorite noise types. If you see one that's missing, please open an issue!
+- Noiz supports noise derivatives and gradiesnts, allowing fast erosion approximations, etc.
+- Noiz supports many noise types that other libraries do not, for example, distance-to-edge worly noise and smooth worly noise.
 
 ## Quick Start
 
@@ -96,7 +98,7 @@ let perlin_fbm_noise = Noise::<LayeredNoise<
     Persistence,
     // Here's the layers:
     // a layer that repeats the inner layers with ever scaling inputs
-    FractalOctaves<
+    FractalLayers<
         // a layer that contributes to the result directly via a `NoiseFunction`
         Octave<
             // The `NoiseFunction` we used in perlin noise
@@ -107,7 +109,7 @@ let perlin_fbm_noise = Noise::<LayeredNoise<
     Normed::default(),
     // Each octave will contribute 0.6 as much as the last.
     Persistence(0.6),
-    FractalOctaves {
+    FractalLayers {
         octave: Default::default(),
         /// Each octave within this layer will be sampled at 1.8 times the scale of the last.
         lacunarity: 1.8,
@@ -205,6 +207,10 @@ All benchmarks are on a standard M2 Max with the same build configuration recomm
 
 Each dimension's benchmarks contain roughly the same number of samples.
 
+All benchmarks are as even as possible. For example, they all do smoothstep interpolation, default seeding, etc.
+
+Only a few combinations of noiz's types are benched. If you are creating your own noise functions, it will always be best to create your own benchmarks for your own specific uses.
+
 ### 2D
 
 Time (milliseconds) per 1024 ^ 2 = 1048576 samples. Lower is better.
@@ -240,6 +246,9 @@ Time (milliseconds) per 101 ^ 3 = 1030301 samples. Lower is better.
 | simplex fbm 8 octave  | 105.5    ✅ | 126.0        | 207.8          | 181.7           | 175.1           |
 | worly                 | 50.8        | 51.1         | 78.9           | 52.9            | 42.3         ✅ |
 | worly approximate     | 6.0      ✅ | 13.6         | ---            | ---             | ---             |
+
+`Vec3A` is an allighed 3d type from `bevy_math` (glam). It enables SIMD instructions, but uses more memory to do so.
+As you can see, it's not worth it here.
 
 ### 4D
 

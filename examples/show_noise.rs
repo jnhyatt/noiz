@@ -8,17 +8,18 @@ use bevy::{
 use noiz::{
     DynamicSampleable, Noise,
     cell_noise::{
-        BlendCellGradients, BlendCellValues, ChebyshevLength, DistanceBlend, DistanceToEdge,
-        EuclideanLength, ManhatanLength, MixCellGradients, MixCellValues, MixCellValuesForDomain,
-        PerCell, PerCellPointDistances, PerNearestPoint, QualityGradients, QuickGradients,
-        SimplecticBlend, WorleyAverage, WorleyDifference, WorleyPointDistance, WorleySmoothMin,
+        BlendCellGradients, BlendCellValues, DistanceBlend, DistanceToEdge, MixCellGradients,
+        MixCellValues, MixCellValuesForDomain, PerCell, PerCellPointDistances, PerNearestPoint,
+        QualityGradients, QuickGradients, SimplecticBlend, WorleyAverage, WorleyDifference,
+        WorleyPointDistance, WorleySmoothMin,
     },
     cells::{OrthoGrid, SimplexGrid, Voronoi},
     curves::{CubicSMin, DoubleSmoothstep, Linear, Smoothstep},
     layering::{
-        DomainWarp, FractalOctaves, LayeredNoise, Normed, NormedByDerivative, Octave,
+        DomainWarp, FractalLayers, LayeredNoise, Normed, NormedByDerivative, Octave,
         PeakDerivativeContribution, Persistence, PersistenceConfig, SmoothDerivativeContribution,
     },
+    lengths::{ChebyshevLength, EuclideanLength, ManhatanLength},
     math_noise::{Billow, PingPong, SNormToUNorm, Spiral},
     misc_noise::{Offset, Peeled, RandomElements, SelfMasked},
     rng::{Random, SNorm, UNorm},
@@ -259,7 +260,7 @@ fn main() -> AppExit {
                                 LayeredNoise<
                                     Normed<f32>,
                                     Persistence,
-                                    FractalOctaves<
+                                    FractalLayers<
                                         Octave<
                                             MixCellGradients<OrthoGrid, Smoothstep, QuickGradients>,
                                         >,
@@ -274,7 +275,7 @@ fn main() -> AppExit {
                                 LayeredNoise<
                                     Normed<f32>,
                                     Persistence,
-                                    FractalOctaves<
+                                    FractalLayers<
                                         Octave<
                                             BlendCellGradients<
                                                 SimplexGrid,
@@ -293,7 +294,7 @@ fn main() -> AppExit {
                                 LayeredNoise<
                                     Normed<f32>,
                                     Persistence,
-                                    FractalOctaves<(
+                                    FractalLayers<(
                                         DomainWarp<
                                             RandomElements<
                                                 BlendCellGradients<
@@ -317,7 +318,7 @@ fn main() -> AppExit {
                                 LayeredNoise::new(
                                     Normed::default(),
                                     Persistence(0.6),
-                                    FractalOctaves {
+                                    FractalLayers {
                                         octave: (
                                             DomainWarp {
                                                 warper: Default::default(),
@@ -338,7 +339,7 @@ fn main() -> AppExit {
                                 LayeredNoise<
                                     Normed<f32>,
                                     Persistence,
-                                    FractalOctaves<(
+                                    FractalLayers<(
                                         DomainWarp<
                                             MixCellValuesForDomain<OrthoGrid, Smoothstep, SNorm>,
                                         >,
@@ -356,7 +357,7 @@ fn main() -> AppExit {
                                 LayeredNoise::new(
                                     Normed::default(),
                                     Persistence(0.6),
-                                    FractalOctaves {
+                                    FractalLayers {
                                         octave: (
                                             DomainWarp {
                                                 warper: Default::default(),
@@ -377,7 +378,7 @@ fn main() -> AppExit {
                                 LayeredNoise<
                                     Normed<f32>,
                                     Persistence,
-                                    FractalOctaves<
+                                    FractalLayers<
                                         Octave<(
                                             Offset<
                                                 RandomElements<
@@ -477,7 +478,7 @@ fn main() -> AppExit {
                                     LayeredNoise<
                                         Normed<f32>,
                                         Persistence,
-                                        FractalOctaves<
+                                        FractalLayers<
                                             Octave<
                                                 BlendCellGradients<
                                                     SimplexGrid,
@@ -499,7 +500,7 @@ fn main() -> AppExit {
                                         LayeredNoise<
                                             Normed<f32>,
                                             Persistence,
-                                            FractalOctaves<
+                                            FractalLayers<
                                                 Octave<
                                                     BlendCellGradients<
                                                         SimplexGrid,
@@ -525,7 +526,7 @@ fn main() -> AppExit {
                                 LayeredNoise<
                                     Normed<f32>,
                                     Persistence,
-                                    FractalOctaves<
+                                    FractalLayers<
                                         Octave<(
                                             BlendCellGradients<
                                                 SimplexGrid,
@@ -545,7 +546,7 @@ fn main() -> AppExit {
                                 LayeredNoise<
                                     Normed<f32>,
                                     Persistence,
-                                    FractalOctaves<
+                                    FractalLayers<
                                         Octave<(
                                             BlendCellGradients<
                                                 SimplexGrid,
@@ -569,7 +570,7 @@ fn main() -> AppExit {
                                         PeakDerivativeContribution,
                                     >,
                                     Persistence,
-                                    FractalOctaves<
+                                    FractalLayers<
                                         Octave<
                                             MixCellGradients<
                                                 OrthoGrid,
@@ -585,7 +586,7 @@ fn main() -> AppExit {
                                 LayeredNoise::new(
                                     NormedByDerivative::default().with_falloff(0.5),
                                     Persistence(0.6),
-                                    FractalOctaves {
+                                    FractalLayers {
                                         octave: Default::default(),
                                         lacunarity: 1.8,
                                         octaves: 8,
@@ -604,7 +605,7 @@ fn main() -> AppExit {
                                         SmoothDerivativeContribution,
                                     >,
                                     Persistence,
-                                    FractalOctaves<
+                                    FractalLayers<
                                         Octave<
                                             MixCellValues<
                                                 OrthoGrid,
@@ -620,7 +621,7 @@ fn main() -> AppExit {
                                 LayeredNoise::new(
                                     NormedByDerivative::default().with_falloff(0.5),
                                     Persistence(0.6),
-                                    FractalOctaves {
+                                    FractalLayers {
                                         octave: Default::default(),
                                         lacunarity: 1.8,
                                         octaves: 8,
@@ -639,7 +640,7 @@ fn main() -> AppExit {
                                         PeakDerivativeContribution,
                                     >,
                                     Persistence,
-                                    FractalOctaves<
+                                    FractalLayers<
                                         Octave<
                                             BlendCellGradients<
                                                 SimplexGrid,
@@ -655,7 +656,7 @@ fn main() -> AppExit {
                                 LayeredNoise::new(
                                     NormedByDerivative::default().with_falloff(0.5),
                                     Persistence(0.6),
-                                    FractalOctaves {
+                                    FractalLayers {
                                         octave: Default::default(),
                                         lacunarity: 1.8,
                                         octaves: 8,
@@ -682,7 +683,7 @@ fn main() -> AppExit {
                                     >,
                                     Persistence,
                                     (
-                                        FractalOctaves<(
+                                        FractalLayers<(
                                             Octave<(
                                                 Offset<
                                                     RandomElements<
@@ -713,7 +714,7 @@ fn main() -> AppExit {
                                                 )>,
                                             >,
                                         )>,
-                                        FractalOctaves<
+                                        FractalLayers<
                                             Octave<
                                                 MixCellValues<
                                                     OrthoGrid<i32>,
@@ -731,7 +732,7 @@ fn main() -> AppExit {
                                     NormedByDerivative::default().with_falloff(0.5),
                                     Persistence(0.6),
                                     (
-                                        FractalOctaves {
+                                        FractalLayers {
                                             octave: (
                                                 Octave((
                                                     Default::default(),
@@ -757,7 +758,7 @@ fn main() -> AppExit {
                                             lacunarity: 1.8,
                                             octaves: 6,
                                         },
-                                        FractalOctaves {
+                                        FractalLayers {
                                             octave: Octave(MixCellValues {
                                                 // The size of the tile
                                                 cells: OrthoGrid(256),
@@ -824,7 +825,7 @@ fn main() -> AppExit {
                                 LayeredNoise<
                                     Normed<f32>,
                                     Persistence,
-                                    FractalOctaves<
+                                    FractalLayers<
                                         Octave<
                                             MixCellGradients<OrthoGrid, Smoothstep, QuickGradients>,
                                         >,
@@ -839,7 +840,7 @@ fn main() -> AppExit {
                                 LayeredNoise<
                                     Normed<f32>,
                                     Persistence,
-                                    FractalOctaves<
+                                    FractalLayers<
                                         Octave<
                                             BlendCellGradients<
                                                 SimplexGrid,
@@ -904,7 +905,7 @@ fn main() -> AppExit {
                                 LayeredNoise<
                                     Normed<f32>,
                                     Persistence,
-                                    FractalOctaves<
+                                    FractalLayers<
                                         Octave<
                                             MixCellGradients<OrthoGrid, Smoothstep, QuickGradients>,
                                         >,
@@ -919,7 +920,7 @@ fn main() -> AppExit {
                                 LayeredNoise<
                                     Normed<f32>,
                                     Persistence,
-                                    FractalOctaves<
+                                    FractalLayers<
                                         Octave<
                                             BlendCellGradients<
                                                 SimplexGrid,
