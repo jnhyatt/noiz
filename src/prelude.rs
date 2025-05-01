@@ -1,19 +1,21 @@
 //! Contains common imports
 
 pub use crate::{
-    ConfigurableNoise, DynamicSampleable, Noise, NoiseFunction, Sampleable, SampleableFor,
+    ConfigurableNoise, DynamicConfigurableSampleable, DynamicSampleable, Noise, NoiseFunction,
+    Sampleable, SampleableFor,
     cell_noise::{
         BlendCellGradients, BlendCellValues, DistanceBlend, MixCellGradients, MixCellValues,
-        PerCell, PerCellPointDistances, QuickGradients, SimplecticBlend, WorleyPointDistance,
+        PerCell, PerCellPointDistances, QuickGradients, SimplecticBlend, WorleyLeastDistance,
     },
     cells::{OrthoGrid, SimplexGrid, Voronoi},
     curves::{DoubleSmoothstep, Linear, Smoothstep},
     layering::{
-        FractalLayers, LayeredNoise, Normed, NormedByDerivative, Octave,
+        DomainWarp, FractalLayers, LayeredNoise, Normed, NormedByDerivative, Octave,
         PeakDerivativeContribution, Persistence,
     },
     lengths::{EuclideanLength, ManhatanLength},
     math_noise::{Billow, PingPong, SNormToUNorm, UNormToSNorm},
+    misc_noise::{Masked, Offset, RandomElements, SelfMasked},
     rng::{Random, SNorm, UNorm},
 };
 
@@ -33,6 +35,9 @@ pub mod common_noise {
 
     /// A [`NoiseFunction`] that produces simplex noise `f32`s between -1 and 1.
     pub type Simplex = BlendCellGradients<SimplexGrid, SimplecticBlend, QuickGradients>;
+
+    /// A [`NoiseFunction`] that produces traditional worly noise `f32`s between 0 and 1.
+    pub type Worly = PerCellPointDistances<Voronoi, EuclideanLength, WorleyLeastDistance>;
 
     /// Represents traditional fractal brownian motion.
     pub type Fbm<T> = LayeredNoise<Normed<f32>, Persistence, FractalLayers<Octave<T>>>;
