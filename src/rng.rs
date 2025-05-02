@@ -55,14 +55,65 @@ impl NoiseRng {
     pub fn rand_u32(&self, input: impl NoiseRngInput) -> u32 {
         let i = input.collapse_for_rng();
 
+        // Inspired by https://nullprogram.com/blog/2018/07/31/
+        let mut x = i;
+        x ^= x.rotate_right(17);
+        x = x.wrapping_mul(Self::KEY);
+        x ^= x.rotate_right(11) ^ self.0;
+        x = x.wrapping_mul(!Self::KEY);
+        x
+
+        // There are *lots* of ways to do this.
+        // I have spent multiple days tweaking different hashes and experimenting.
+        // All of these options have trade offs.
+        // They all differ in performance and quality.
+        // Many of them perform vastly differently for different noise functions in practice.
+        // I ultimately went with the one above, but feel free to play around with it yourself.
+        // I'm certain these can be improved; I just don't think it's worth the effort yet. It's good enough.
+        // I can't imagine users would want to also configure their hash function of all things.
+
+        // WIP
+        // let m = i ^ Self::KEY;
+        // let a = i ^ self.0;
+        // let b = a.wrapping_mul(m);
+        // let c = a.rotate_right(16);
+        // let d = c.wrapping_mul(m);
+        // let e = b.rotate_right(8);
+        // e.wrapping_mul(d)
+
+        // WIP
+        // let a = i ^ self.0;
+        // let m = i ^ Self::KEY;
+        // let b = i.rotate_left(16) ^ m;
+        // let x = b.wrapping_mul(m).wrapping_add(a);
+        // let y = a.rotate_right(8) ^ m;
+        // x.wrapping_mul(y)
+
+        // WIP
+        // let mut x = i;
+        // let mut m = i ^ Self::KEY;
+        // // x = x.rotate_left(12) ^ m;
+        // x = x.wrapping_mul(m).wrapping_add(self.0);
+        // m = !m;
+        // x = x.rotate_right(16).wrapping_mul(m);
+        // x ^= x.rotate_left(8);
+        // x
+
+        // WIP
+        // let a = i ^ Self::KEY;
+        // let b = i.rotate_left(7) ^ self.0;
+        // let c = a.wrapping_mul(b).rotate_left(16);
+        // let d = b.rotate_right(14) ^ Self::KEY;
+        // c.wrapping_mul(d)
+
         // This is the best and fastest hash I've created.
-        let mut r1 = i ^ Self::KEY;
-        let mut r2 = i ^ self.0;
-        r2 = r2.rotate_left(11);
-        r2 ^= r1;
-        r1 = r1.wrapping_mul(r2);
-        r2 = r2.rotate_left(27);
-        r1.wrapping_mul(r2)
+        // let mut r1 = i ^ Self::KEY;
+        // let mut r2 = i ^ self.0;
+        // r2 = r2.rotate_left(11);
+        // r2 ^= r1;
+        // r1 = r1.wrapping_mul(r2);
+        // r2 = r2.rotate_left(27);
+        // r1.wrapping_mul(r2)
 
         // This can be faster but has rotational symmetry
         // let a = i.rotate_left(11) ^ i ^ self.0;
@@ -210,7 +261,7 @@ impl NoiseRngInput for u32 {
 impl NoiseRngInput for UVec2 {
     #[inline(always)]
     fn collapse_for_rng(self) -> u32 {
-        self.x.wrapping_add(self.y.rotate_right(8))
+        self.x.wrapping_add(self.y.rotate_left(8) ^ NoiseRng::KEY)
     }
 }
 
@@ -218,8 +269,8 @@ impl NoiseRngInput for UVec3 {
     #[inline(always)]
     fn collapse_for_rng(self) -> u32 {
         self.x
-            .wrapping_add(self.y.rotate_right(8))
-            .wrapping_add(self.z.rotate_right(16))
+            .wrapping_add(self.y.rotate_left(8))
+            .wrapping_add(self.z.rotate_left(16))
     }
 }
 
@@ -227,9 +278,9 @@ impl NoiseRngInput for UVec4 {
     #[inline(always)]
     fn collapse_for_rng(self) -> u32 {
         self.x
-            .wrapping_add(self.y.rotate_right(8))
-            .wrapping_add(self.z.rotate_right(16))
-            .wrapping_add(self.w.rotate_right(24))
+            .wrapping_add(self.y.rotate_left(8))
+            .wrapping_add(self.z.rotate_left(16))
+            .wrapping_add(self.w.rotate_left(24))
     }
 }
 
