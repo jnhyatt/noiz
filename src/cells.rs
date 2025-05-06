@@ -138,14 +138,16 @@ impl<T: MulAssign<f32>, G: MulAssign<f32>> MulAssign<f32> for WithGradient<T, G>
     }
 }
 
-impl<T: Mul<T, Output = T>, G: Mul<G, Output = G>> Mul<Self> for WithGradient<T, G> {
+impl<T: Mul<T, Output = T> + Copy, G: Mul<T, Output = G> + Add<G, Output = G>> Mul<Self>
+    for WithGradient<T, G>
+{
     type Output = Self;
 
     #[inline(always)]
     fn mul(self, rhs: Self) -> Self::Output {
         Self {
             value: self.value * rhs.value,
-            gradient: self.gradient * rhs.gradient,
+            gradient: self.gradient * rhs.value + rhs.gradient * self.value,
         }
     }
 }
@@ -154,6 +156,46 @@ impl<G> From<WithGradient<f32, G>> for f32 {
     #[inline(always)]
     fn from(val: WithGradient<f32, G>) -> Self {
         val.value
+    }
+}
+
+impl From<WithGradient<f32, [f32; 2]>> for WithGradient<f32, Vec2> {
+    #[inline(always)]
+    fn from(val: WithGradient<f32, [f32; 2]>) -> Self {
+        Self {
+            value: val.value,
+            gradient: val.gradient.into(),
+        }
+    }
+}
+
+impl From<WithGradient<f32, [f32; 3]>> for WithGradient<f32, Vec3> {
+    #[inline(always)]
+    fn from(val: WithGradient<f32, [f32; 3]>) -> Self {
+        Self {
+            value: val.value,
+            gradient: val.gradient.into(),
+        }
+    }
+}
+
+impl From<WithGradient<f32, [f32; 3]>> for WithGradient<f32, Vec3A> {
+    #[inline(always)]
+    fn from(val: WithGradient<f32, [f32; 3]>) -> Self {
+        Self {
+            value: val.value,
+            gradient: val.gradient.into(),
+        }
+    }
+}
+
+impl From<WithGradient<f32, [f32; 4]>> for WithGradient<f32, Vec4> {
+    #[inline(always)]
+    fn from(val: WithGradient<f32, [f32; 4]>) -> Self {
+        Self {
+            value: val.value,
+            gradient: val.gradient.into(),
+        }
     }
 }
 
@@ -415,7 +457,7 @@ impl<W: WrappingAmount<IVec2>> DifferentiableCell for SquareCell<Vec2, IVec2, W>
         // lerp
         let dx = ld_rd.lerp(lu_ru, mix_y.value) * mix_x.derivative;
         let dy = ld_lu.lerp(rd_ru, mix_x.value) * mix_y.derivative;
-        [dx * gradient_scale, dy * gradient_scale]
+        [-dx * gradient_scale, -dy * gradient_scale]
     }
 }
 
@@ -532,9 +574,9 @@ impl<W: WrappingAmount<IVec3>> DifferentiableCell for SquareCell<Vec3, IVec3, W>
         } * mix_z.derivative;
 
         [
-            dx * gradient_scale,
-            dy * gradient_scale,
-            dz * gradient_scale,
+            -dx * gradient_scale,
+            -dy * gradient_scale,
+            -dz * gradient_scale,
         ]
     }
 }
@@ -652,9 +694,9 @@ impl<W: WrappingAmount<IVec3>> DifferentiableCell for SquareCell<Vec3A, IVec3, W
         } * mix_z.derivative;
 
         [
-            dx * gradient_scale,
-            dy * gradient_scale,
-            dz * gradient_scale,
+            -dx * gradient_scale,
+            -dy * gradient_scale,
+            -dz * gradient_scale,
         ]
     }
 }
@@ -863,10 +905,10 @@ impl<W: WrappingAmount<IVec4>> DifferentiableCell for SquareCell<Vec4, IVec4, W>
             d.lerp(u, mix_y.value)
         } * mix_w.derivative;
         [
-            dx * gradient_scale,
-            dy * gradient_scale,
-            dz * gradient_scale,
-            dw * gradient_scale,
+            -dx * gradient_scale,
+            -dy * gradient_scale,
+            -dz * gradient_scale,
+            -dw * gradient_scale,
         ]
     }
 }
