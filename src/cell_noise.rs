@@ -755,29 +755,44 @@ impl<
 }
 
 /// Allows blending between different values `V` where each values corresponds to a [`CellPoint<I>`](crate::cells::CellPoint).
-pub trait Blender<I: VectorSpace, V> {
+pub trait ValueBlender<I: VectorSpace, V> {
     /// Blends together each value `V` of `to_blend` according to some weight `I`, where weights beyond the range of `blending_half_radius` are ignored.
     /// `blending_half_radius` cuts off the blend before it hits discontinuities.
-    fn blend(&self, to_blend: impl Iterator<Item = (V, I)>, blending_half_radius: f32) -> V;
-
-    /// When the values to blend are computed as the dot product of the `offset`s passed to [`blend`](Blender::blend), the values are already weighted to some extent.
-    /// This counteracts that weight by opperating on the already weighted value.
-    /// Assuming the collected `value` was the dot of some vector `a` with this `offset`, this will map the value into `±|a|`.
-    fn counter_dot_product(&self, value: V, blending_half_radius: f32) -> V;
+    fn blend_values(&self, to_blend: impl Iterator<Item = (V, I)>, blending_half_radius: f32) -> V;
 }
 
-/// Allows derivatives to be calculated from blending. See also [`Blender`].
-pub trait DiferentiableGradientBlender<I: VectorSpace>: Blender<I, f32> {
-    /// Identical to [`Blender::blend`] but with a gradient.
-    /// This presumes the blending values are coming from a gradient dot product like simplex noise.
-    fn blend_with_gradient(
+/// Same as [`ValueBlender`] but also differentiates the result.
+pub trait DifferentiableValueBlender<I: VectorSpace, V>: ValueBlender<I, V> {
+    /// Same as [`blend_values`](ValueBlender::blend_values) but also differentiates the result.
+    fn differential_blend_values(
         &self,
-        to_blend: impl Iterator<Item = (WithGradient<f32, I>, I)>,
+        to_blend: impl Iterator<Item = (V, I)>,
+        blending_half_radius: f32,
+    ) -> WithGradient<V, I>;
+}
+
+/// Similar to [`ValueBlender`] but specialized for blending gradient dot products.
+/// In other words, the weight has a role in the value, even before blending.
+pub trait GradientBlender<I: VectorSpace> {
+    /// Blends between gradient and offset pairs, returning a dot product blended value.
+    fn blend_gradients(
+        &self,
+        to_blend: impl Iterator<Item = (I, I)>,
+        blending_half_radius: f32,
+    ) -> f32;
+}
+
+/// Same as [`GradientBlender`] but also differentiates the result.
+pub trait DifferentiableGradientBlender<I: VectorSpace>: GradientBlender<I> {
+    /// Same as [`blend_gradients`](GradientBlender::blend_gradients) but also differentiates the result.
+    fn differential_blend_gradients(
+        &self,
+        to_blend: impl Iterator<Item = (I, I)>,
         blending_half_radius: f32,
     ) -> WithGradient<f32, I>;
 }
 
-/// A [`NoiseFunction`] that blends values sourced from a [`ConcreteAnyValueFromBits`] `N` by a [`Blender`] `B` within some [`DomainCell`] form a [`Partitioner`] `P`.
+/// A [`NoiseFunction`] that blends values sourced from a [`ConcreteAnyValueFromBits`] `N` by a [`ValueBlender`] `B` within some [`DomainCell`] form a [`Partitioner`] `P`.
 ///
 /// This results in smooth blending between values. Note that this does *not* mix between values; it only blends them together so there isn't a sharp jump.
 /// To see this clearly, run the "show_noise" example.
@@ -796,8 +811,7 @@ pub trait DiferentiableGradientBlender<I: VectorSpace>: Blender<I, f32> {
 /// let noise = Noise::<BlendCellValues<Voronoi, DistanceBlend<ManhattanLength>, Random<UNorm, f32>>>::default();
 /// ```
 ///
-/// If you are interested in calculating the gradient of the noise as well, turn on `DIFFERENTIATE` (off by default).
-/// Note that these gradients are mean to be visually pleasing and roughly meaningful, but they are not yet mathematically precise.
+/// If you are interested in calculating the gradient of the noise as well, turn on `DIFFERENTIATE` (off by default), and use a [`DifferentiableValueBlender`].
 ///
 /// ```
 /// # use noiz::prelude::*;
@@ -814,14 +828,14 @@ pub struct BlendCellValues<P, B, N, const DIFFERENTIATE: bool = false> {
     pub cells: P,
     /// The [`ConcreteAnyValueFromBits`].
     pub noise: N,
-    /// The [`Blender`].
+    /// The [`ValueBlender`].
     pub blender: B,
 }
 
 impl<
     I: VectorSpace,
     P: Partitioner<I, Cell: BlendableDomainCell>,
-    B: Blender<I, N::Concrete>,
+    B: ValueBlender<I, N::Concrete>,
     N: ConcreteAnyValueFromBits,
 > NoiseFunction<I> for BlendCellValues<P, B, N, false>
 {
@@ -835,14 +849,15 @@ impl<
             let value = self.noise.any_value(p.rough_id);
             (value, p.offset)
         });
-        self.blender.blend(to_blend, cell.blending_half_radius())
+        self.blender
+            .blend_values(to_blend, cell.blending_half_radius())
     }
 }
 
 impl<
     I: VectorSpace + Mul<N::Concrete, Output = I>,
     P: Partitioner<I, Cell: BlendableDomainCell>,
-    B: Blender<I, WithGradient<N::Concrete, I>>,
+    B: DifferentiableValueBlender<I, N::Concrete>,
     N: ConcreteAnyValueFromBits<Concrete: Copy>,
 > NoiseFunction<I> for BlendCellValues<P, B, N, true>
 {
@@ -852,16 +867,12 @@ impl<
     fn evaluate(&self, input: I, seeds: &mut NoiseRng) -> Self::Output {
         let cell = self.cells.partition(input);
         let to_blend = cell.iter_points(*seeds).map(|p| {
+            // We can't use the `linear_equivalent_value` because the blend type is not linear.
             let value = self.noise.any_value(p.rough_id);
-            (
-                WithGradient {
-                    value,
-                    gradient: -p.offset * value,
-                },
-                p.offset,
-            )
+            (value, p.offset)
         });
-        self.blender.blend(to_blend, cell.blending_half_radius())
+        self.blender
+            .differential_blend_values(to_blend, cell.blending_half_radius())
     }
 }
 
@@ -967,7 +978,7 @@ impl<
     }
 }
 
-/// A [`NoiseFunction`] that blends gradients sourced from a [`GradientGenerator`] `G` by a [`Blender`] `B` within some [`DomainCell`] form a [`Partitioner`] `P`.
+/// A [`NoiseFunction`] that blends gradients sourced from a [`GradientGenerator`] `G` by a [`GradientBlender`] `B` within some [`DomainCell`] form a [`Partitioner`] `P`.
 ///
 /// This is typically used for simplex noise:
 ///
@@ -976,8 +987,7 @@ impl<
 /// let noise = Noise::<BlendCellGradients<SimplexGrid, SimplecticBlend, QuickGradients>>::default();
 /// ```
 ///
-/// If you are interested in calculating the gradient of the noise as well, turn on `DIFFERENTIATE` (off by default).
-/// Note that these gradients are mean to be visually pleasing and roughly meaningful, but they are not yet mathematically precise.
+/// If you are interested in calculating the gradient of the noise as well, turn on `DIFFERENTIATE` (off by default), and use a  [`DifferentiableGradientBlender`].
 ///
 /// ```
 /// # use noiz::prelude::*;
@@ -994,14 +1004,14 @@ pub struct BlendCellGradients<P, B, G, const DIFFERENTIATE: bool = false> {
     pub cells: P,
     /// The [`GradientGenerator`].
     pub gradients: G,
-    /// The [`Blender`].
+    /// The [`GradientBlender`].
     pub blender: B,
 }
 
 impl<
     I: VectorSpace,
     P: Partitioner<I, Cell: BlendableDomainCell>,
-    B: Blender<I, f32>,
+    B: GradientBlender<I>,
     G: GradientGenerator<I>,
 > NoiseFunction<I> for BlendCellGradients<P, B, G, false>
 {
@@ -1011,19 +1021,18 @@ impl<
     fn evaluate(&self, input: I, seeds: &mut NoiseRng) -> Self::Output {
         let cell = self.cells.partition(input);
         let to_blend = cell.iter_points(*seeds).map(|p| {
-            let dot = self.gradients.get_gradient_dot(p.rough_id, p.offset);
-            (dot, p.offset)
+            let grad = self.gradients.get_gradient(p.rough_id);
+            (grad, p.offset)
         });
         let radius = cell.blending_half_radius();
-        self.blender
-            .counter_dot_product(self.blender.blend(to_blend, radius), radius)
+        self.blender.blend_gradients(to_blend, radius)
     }
 }
 
 impl<
     I: VectorSpace,
     P: Partitioner<I, Cell: BlendableDomainCell>,
-    B: DiferentiableGradientBlender<I>,
+    B: DifferentiableGradientBlender<I>,
     G: GradientGenerator<I>,
 > NoiseFunction<I> for BlendCellGradients<P, B, G, true>
 {
@@ -1032,21 +1041,12 @@ impl<
     #[inline]
     fn evaluate(&self, input: I, seeds: &mut NoiseRng) -> Self::Output {
         let cell = self.cells.partition(input);
-
         let to_blend = cell.iter_points(*seeds).map(|p| {
-            let dot = self.gradients.get_gradient_dot(p.rough_id, p.offset);
-            (
-                WithGradient {
-                    value: dot,
-                    gradient: self.gradients.get_gradient(p.rough_id),
-                },
-                p.offset,
-            )
+            let grad = self.gradients.get_gradient(p.rough_id);
+            (grad, p.offset)
         });
         let radius = cell.blending_half_radius();
-        let mut raw = self.blender.blend_with_gradient(to_blend, radius);
-        raw.value = self.blender.counter_dot_product(raw.value, radius);
-        raw
+        self.blender.differential_blend_gradients(to_blend, radius)
     }
 }
 
@@ -1247,7 +1247,7 @@ impl GradientGenerator<Vec3A> for QualityGradients {
     }
 }
 
-/// A [`Blender`] that weighs each values by it's distance, as computed by a [`LengthFunction`].
+/// A [`ValueBlender`] that weighs each values by it's distance, as computed by a [`LengthFunction`].
 ///
 /// This is mainly used for fun worly noise:
 ///
@@ -1263,10 +1263,10 @@ impl GradientGenerator<Vec3A> for QualityGradients {
 pub struct DistanceBlend<L>(pub L);
 
 impl<V: Mul<f32, Output = V> + Default + AddAssign<V>, L: LengthFunction<I>, I: VectorSpace>
-    Blender<I, V> for DistanceBlend<L>
+    ValueBlender<I, V> for DistanceBlend<L>
 {
     #[inline]
-    fn blend(&self, to_blend: impl Iterator<Item = (V, I)>, blending_half_radius: f32) -> V {
+    fn blend_values(&self, to_blend: impl Iterator<Item = (V, I)>, blending_half_radius: f32) -> V {
         let mut sum = V::default();
         let mut weight_sum = 0f32;
         let mut cnt = 0;
@@ -1280,20 +1280,16 @@ impl<V: Mul<f32, Output = V> + Default + AddAssign<V>, L: LengthFunction<I>, I: 
         }
         sum * (weight_sum / (cnt as f32 * clamp_len))
     }
-
-    #[inline]
-    fn counter_dot_product(&self, value: V, _blending_half_radius: f32) -> V {
-        value
-    }
 }
 
-/// A [`Blender`] that defers to another [`Blender`] `T` and scales its blending radius by some value.
+/// A blender that defers to another blender `T` and scales its blending radius by some value.
+/// This works with [`GradientBlender`], [`DifferentiableGradientBlender`], [`ValueBlender`], and [`DifferentiableValueBlender`].
 #[derive(Default, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "bevy_reflect", derive(bevy_reflect::Reflect))]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize))]
 #[cfg_attr(feature = "debug", derive(Debug))]
 pub struct LocalBlend<T> {
-    /// The inner [`Blender`].
+    /// The inner blender.
     pub blender: T,
     /// The scale of the blending radius.
     /// Values in (0, 1) will decrease the blending, producing more localized values.
@@ -1302,24 +1298,59 @@ pub struct LocalBlend<T> {
     pub radius_scale: f32,
 }
 
-impl<V, I: VectorSpace, B: Blender<I, V>> Blender<I, V> for LocalBlend<B> {
+impl<V, I: VectorSpace, B: ValueBlender<I, V>> ValueBlender<I, V> for LocalBlend<B> {
     #[inline]
-    fn blend(&self, to_blend: impl Iterator<Item = (V, I)>, blending_half_radius: f32) -> V {
+    fn blend_values(&self, to_blend: impl Iterator<Item = (V, I)>, blending_half_radius: f32) -> V {
         self.blender
-            .blend(to_blend, blending_half_radius * self.radius_scale)
-    }
-
-    #[inline]
-    fn counter_dot_product(&self, value: V, blending_half_radius: f32) -> V {
-        self.blender
-            .counter_dot_product(value, blending_half_radius)
+            .blend_values(to_blend, blending_half_radius * self.radius_scale)
     }
 }
 
-/// A [`Blender`] built for the [`SimplexGrid`](crate::cells::SimplexGrid) for simplex noise that smoothly blends values in a pleasant way.
+impl<V, I: VectorSpace, B: DifferentiableValueBlender<I, V>> DifferentiableValueBlender<I, V>
+    for LocalBlend<B>
+{
+    #[inline]
+    fn differential_blend_values(
+        &self,
+        to_blend: impl Iterator<Item = (V, I)>,
+        blending_half_radius: f32,
+    ) -> WithGradient<V, I> {
+        self.blender
+            .differential_blend_values(to_blend, blending_half_radius * self.radius_scale)
+    }
+}
+
+impl<I: VectorSpace, B: GradientBlender<I>> GradientBlender<I> for LocalBlend<B> {
+    #[inline]
+    fn blend_gradients(
+        &self,
+        to_blend: impl Iterator<Item = (I, I)>,
+        blending_half_radius: f32,
+    ) -> f32 {
+        self.blender
+            .blend_gradients(to_blend, blending_half_radius * self.radius_scale)
+    }
+}
+
+impl<I: VectorSpace, B: DifferentiableGradientBlender<I>> DifferentiableGradientBlender<I>
+    for LocalBlend<B>
+{
+    #[inline]
+    fn differential_blend_gradients(
+        &self,
+        to_blend: impl Iterator<Item = (I, I)>,
+        blending_half_radius: f32,
+    ) -> WithGradient<f32, I> {
+        self.blender
+            .differential_blend_gradients(to_blend, blending_half_radius * self.radius_scale)
+    }
+}
+
+/// A [`GradientBlender`] and [`ValueBlender`] built for the [`SimplexGrid`](crate::cells::SimplexGrid) for simplex noise that smoothly blends values in a pleasant way.
+/// This also implements [`DifferentiableGradientBlender`] and [`DifferentiableValueBlender`].
 ///
 /// This can also be used to make "even" blending in [`BlendCellValues`].
-/// If you're not sure which [`Blender`] to use, start with this one.
+/// If you're not sure which blender to use, start with this one.
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "bevy_reflect", derive(bevy_reflect::Reflect))]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize))]
@@ -1351,9 +1382,13 @@ fn general_simplex_weight_derivative(length_sqrd: f32, blending_half_radius: f32
 
 macro_rules! impl_simplectic_blend {
     ($i:ty, $c:literal) => {
-        impl<V: Mul<f32, Output = V> + Default + AddAssign<V>> Blender<$i, V> for SimplecticBlend {
+        impl<V: Mul<f32, Output = V> + Default + AddAssign<V> + Copy> ValueBlender<$i, V>
+            for SimplecticBlend
+        where
+            $i: Mul<V, Output = $i> + Mul<f32, Output = $i>,
+        {
             #[inline]
-            fn blend(
+            fn blend_values(
                 &self,
                 to_blend: impl Iterator<Item = (V, $i)>,
                 blending_half_radius: f32,
@@ -1365,33 +1400,82 @@ macro_rules! impl_simplectic_blend {
                 }
                 sum
             }
-
-            #[inline]
-            fn counter_dot_product(&self, value: V, blending_half_radius: f32) -> V {
-                let sqr = blending_half_radius * blending_half_radius;
-                value * ($c * sqr * sqr)
-            }
         }
 
-        impl DiferentiableGradientBlender<$i> for SimplecticBlend {
+        impl<V: Mul<f32, Output = V> + Default + AddAssign<V> + Copy>
+            DifferentiableValueBlender<$i, V> for SimplecticBlend
+        where
+            $i: Mul<V, Output = $i> + Mul<f32, Output = $i>,
+        {
             #[inline]
-            fn blend_with_gradient(
+            fn differential_blend_values(
                 &self,
-                to_blend: impl Iterator<Item = (WithGradient<f32, $i>, $i)>,
+                to_blend: impl Iterator<Item = (V, $i)>,
                 blending_half_radius: f32,
-            ) -> WithGradient<f32, $i> {
-                let mut sum = WithGradient::<f32, $i>::default();
+            ) -> WithGradient<V, $i> {
+                let mut sum = WithGradient {
+                    value: V::default(),
+                    gradient: <$i>::ZERO,
+                };
                 for (val, weight) in to_blend {
                     let len_sqr = weight.length_squared();
                     let falloff = general_simplex_weight(len_sqr, blending_half_radius);
-                    let d_falloff =
-                        general_simplex_weight_derivative(len_sqr, blending_half_radius);
+                    let d_falloff = weight
+                        * general_simplex_weight_derivative(len_sqr, blending_half_radius)
+                        * (-2.0 / blending_half_radius); // chain rule
+                    sum.value += val * falloff;
+                    sum.gradient += d_falloff * val;
+                }
+                sum
+            }
+        }
+
+        impl GradientBlender<$i> for SimplecticBlend {
+            #[inline]
+            fn blend_gradients(
+                &self,
+                to_blend: impl Iterator<Item = ($i, $i)>,
+                blending_half_radius: f32,
+            ) -> f32 {
+                let mut sum = 0.0;
+                let blending_half_radius_sqrd = blending_half_radius * blending_half_radius;
+                let counter_dot_product =
+                    ($c * blending_half_radius_sqrd * blending_half_radius_sqrd);
+                for (grad, offset) in to_blend {
+                    let dot = grad.dot(offset);
+                    let len_sqr = offset.length_squared();
+                    let falloff = general_simplex_weight(len_sqr, blending_half_radius);
+                    sum += dot * falloff;
+                }
+                sum *= counter_dot_product;
+                sum
+            }
+        }
+
+        impl DifferentiableGradientBlender<$i> for SimplecticBlend {
+            #[inline]
+            fn differential_blend_gradients(
+                &self,
+                to_blend: impl Iterator<Item = ($i, $i)>,
+                blending_half_radius: f32,
+            ) -> WithGradient<f32, $i> {
+                let mut sum = WithGradient::<f32, $i>::default();
+                let blending_half_radius_sqrd = blending_half_radius * blending_half_radius;
+                let counter_dot_product =
+                    ($c * blending_half_radius_sqrd * blending_half_radius_sqrd);
+                for (grad, offset) in to_blend {
+                    let dot = grad.dot(offset);
+                    let len_sqr = offset.length_squared();
+                    let falloff = general_simplex_weight(len_sqr, blending_half_radius);
+                    let d_falloff = offset
+                        * general_simplex_weight_derivative(len_sqr, blending_half_radius)
+                        * (-2.0 / blending_half_radius); // chain rule
                     sum += WithGradient {
-                        value: val.value * falloff,
-                        gradient: val.gradient * falloff
-                            + weight.normalize_or_zero() * d_falloff * -val.value,
+                        value: dot * falloff,
+                        gradient: grad * falloff + dot * d_falloff, // product rule
                     };
                 }
+                sum *= counter_dot_product;
                 sum
             }
         }
@@ -1413,12 +1497,10 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore = "These gradients are not mathematically rigorous."]
-    // TODO: Make them rigorous and keep the test.
     fn test_simplex_gradients() {
         /// Amount we step to approximate gradient. This must be significantly smaller than the
         /// noise features to be any sort of accurate.
-        const STEP: f32 = 1e-5;
+        const STEP: f32 = 1e-3;
         /// Epsilon for gradient approximation comparison.
         const EPSILON: f32 = 1e-3;
         let noise = Noise::<BlendCellGradients<SimplexGrid, SimplecticBlend, QuickGradients, true>>::default();
@@ -1439,12 +1521,12 @@ mod tests {
             let positive_grad = Vec2::new(
                 noise.sample_for::<f32>(point + STEP * Vec2::X) - result.value,
                 noise.sample_for::<f32>(point + STEP * Vec2::Y) - result.value,
-            ) / STEP;
+            );
             let negative_grad = Vec2::new(
                 result.value - noise.sample_for::<f32>(point - STEP * Vec2::X),
                 result.value - noise.sample_for::<f32>(point - STEP * Vec2::Y),
-            ) / STEP;
-            let approximate_gradient = positive_grad + negative_grad;
+            );
+            let approximate_gradient = (positive_grad + negative_grad) / (STEP * 2.0);
             let analytical_gradient = result.gradient;
             if approximate_gradient.distance(result.gradient) > EPSILON {
                 println!(
