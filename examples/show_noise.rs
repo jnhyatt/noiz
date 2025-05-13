@@ -558,7 +558,7 @@ fn main() -> AppExit {
                                 SNormToUNorm,
                             )>::from((
                                 LayeredNoise::new(
-                                    NormedByDerivative::default().with_falloff(0.5),
+                                    NormedByDerivative::default(),
                                     Persistence(0.6),
                                     FractalLayers {
                                         layer: Default::default(),
@@ -594,7 +594,7 @@ fn main() -> AppExit {
                                 SNormToUNorm,
                             )>::from((
                                 LayeredNoise::new(
-                                    NormedByDerivative::default().with_falloff(0.5),
+                                    NormedByDerivative::default(),
                                     Persistence(0.6),
                                     FractalLayers {
                                         layer: Default::default(),
@@ -630,7 +630,7 @@ fn main() -> AppExit {
                                 SNormToUNorm,
                             )>::from((
                                 LayeredNoise::new(
-                                    NormedByDerivative::default().with_falloff(0.5),
+                                    NormedByDerivative::default(),
                                     Persistence(0.6),
                                     FractalLayers {
                                         layer: Default::default(),
@@ -689,7 +689,7 @@ fn main() -> AppExit {
                         },
                         // Let's put it all together in a (contrived) example:
                         NoiseOption {
-                            name: "Usecase: Tileable Heightmap",
+                            name: "Contrived lots of noise types",
                             noise: Box::new(Noise::<(
                                 LayeredNoise<
                                     NormedByDerivative<
@@ -725,6 +725,7 @@ fn main() -> AppExit {
                                                         OrthoGrid<i32>,
                                                         Smoothstep,
                                                         QuickGradients,
+                                                        true,
                                                     >,
                                                     Billow,
                                                 )>,
@@ -736,7 +737,7 @@ fn main() -> AppExit {
                                                     OrthoGrid<i32>,
                                                     Smoothstep,
                                                     Random<SNorm, f32>,
-                                                    false,
+                                                    true,
                                                 >,
                                             >,
                                         >,
