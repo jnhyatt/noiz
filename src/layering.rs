@@ -6,8 +6,13 @@ use core::{
     ops::{AddAssign, Div, Mul},
 };
 
-use crate::{NoiseFunction, cells::WithGradient, lengths::LengthFunction, rng::NoiseRng};
-use bevy_math::{Curve, VectorSpace};
+use crate::{
+    NoiseFunction,
+    cells::WithGradient,
+    lengths::{DifferentiableLengthFunction, LengthFunction},
+    rng::NoiseRng,
+};
+use bevy_math::{Curve, VectorSpace, WithDerivative, curve::derivatives::SampleDerivative};
 
 /// This represents the context of some [`LayerResult`].
 /// This may store metadata collected in [`LayerOperation::prepare`].
@@ -71,15 +76,13 @@ pub trait LayerOperation<R: LayerResultContext, W: LayerWeights> {
 
 /// Specifies that this [`LayerOperation`] can be done on type `I`.
 /// If this adds to the `result`, this is called an octave. The most common kind of octave is [`Octave`].
-pub trait LayerOperationFor<I: VectorSpace, R: LayerResultContextFor<I>, W: LayerWeights>:
-    LayerOperation<R, W>
-{
+pub trait LayerOperationFor<I: VectorSpace, R: LayerResult, W: LayerWeights> {
     /// Performs the layer operation. Use `seeds` to drive randomness, `working_loc` to drive input, `result` to collect output, and `weight` to enable blending with other operations.
     fn do_noise_op(
         &self,
         seeds: &mut NoiseRng,
         working_loc: &mut I,
-        result: &mut R::Result,
+        result: &mut R,
         weights: &mut W,
     );
 }
@@ -96,13 +99,13 @@ macro_rules! impl_all_operation_tuples {
             }
         }
 
-        impl<I: VectorSpace, R: LayerResultContextFor<I>, W: LayerWeights, $i: LayerOperationFor<I, R, W>, $($ni: LayerOperationFor<I, R, W>),* > LayerOperationFor<I, R, W> for ($i, $($ni),*) {
+        impl<I: VectorSpace, R: LayerResult, W: LayerWeights, $i: LayerOperationFor<I, R, W>, $($ni: LayerOperationFor<I, R, W>),* > LayerOperationFor<I, R, W> for ($i, $($ni),*) {
             #[inline]
             fn do_noise_op(
                 &self,
                 seeds: &mut NoiseRng,
                 working_loc: &mut I,
-                result: &mut R::Result,
+                result: &mut R,
                 weights: &mut W,
             ) {
                 self.$f.do_noise_op(seeds, working_loc, result, weights);
@@ -227,7 +230,7 @@ impl<
     I: VectorSpace,
     R: LayerResultContextFor<I>,
     W: LayerWeightsSettings,
-    N: LayerOperationFor<I, R, W::Weights>,
+    N: LayerOperationFor<I, R::Result, W::Weights>,
 > NoiseFunction<I> for LayeredNoise<R, W, N, false>
 {
     type Output = <R::Result as LayerResult>::Output;
@@ -246,7 +249,7 @@ impl<
     I: VectorSpace,
     R: LayerResultContextFor<I>,
     W: LayerWeightsSettings,
-    N: LayerOperationFor<I, R, W::Weights>,
+    N: LayerOperationFor<I, R::Result, W::Weights>,
 > NoiseFunction<I> for LayeredNoise<R, W, N, true>
 {
     type Output = R::Result;
@@ -276,19 +279,15 @@ impl<T, R: LayerResultContext, W: LayerWeights> LayerOperation<R, W> for Octave<
     }
 }
 
-impl<
-    T: NoiseFunction<I>,
-    I: VectorSpace,
-    R: LayerResultContextFor<I, Result: LayerResultFor<T::Output>>,
-    W: LayerWeights,
-> LayerOperationFor<I, R, W> for Octave<T>
+impl<T: NoiseFunction<I>, I: VectorSpace, R: LayerResultFor<T::Output>, W: LayerWeights>
+    LayerOperationFor<I, R, W> for Octave<T>
 {
     #[inline]
     fn do_noise_op(
         &self,
         seeds: &mut NoiseRng,
         working_loc: &mut I,
-        result: &mut R::Result,
+        result: &mut R,
         weights: &mut W,
     ) {
         let octave_result = self.0.evaluate(*working_loc, seeds);
@@ -354,7 +353,7 @@ impl<T, R: LayerResultContext, W: LayerWeights> LayerOperation<R, W> for DomainW
     fn prepare(&self, _result_context: &mut R, _weights: &mut W) {}
 }
 
-impl<T: NoiseFunction<I, Output = I>, I: VectorSpace, R: LayerResultContextFor<I>, W: LayerWeights>
+impl<T: NoiseFunction<I, Output = I>, I: VectorSpace, R: LayerResult, W: LayerWeights>
     LayerOperationFor<I, R, W> for DomainWarp<T>
 {
     #[inline]
@@ -362,7 +361,7 @@ impl<T: NoiseFunction<I, Output = I>, I: VectorSpace, R: LayerResultContextFor<I
         &self,
         seeds: &mut NoiseRng,
         working_loc: &mut I,
-        _result: &mut R::Result,
+        _result: &mut R,
         _weights: &mut W,
     ) {
         let warp_by = self.warper.evaluate(*working_loc, seeds) * self.strength;
@@ -422,17 +421,15 @@ impl<T: LayerOperation<R, PersistenceWeights>, R: LayerResultContext>
     }
 }
 
-impl<T: LayerOperationFor<I, R, PersistenceWeights>, I: VectorSpace, R: LayerResultContextFor<I>>
+impl<T: LayerOperationFor<I, R, PersistenceWeights>, I: VectorSpace, R: LayerResult>
     LayerOperationFor<I, R, PersistenceWeights> for PersistenceConfig<T>
-where
-    Self: LayerOperation<R, PersistenceWeights>,
 {
     #[inline]
     fn do_noise_op(
         &self,
         seeds: &mut NoiseRng,
         working_loc: &mut I,
-        result: &mut R::Result,
+        result: &mut R,
         weights: &mut PersistenceWeights,
     ) {
         weights.persistence.0 *= self.config;
@@ -499,22 +496,69 @@ impl<T: LayerOperation<R, W>, R: LayerResultContext, W: LayerWeights> LayerOpera
     }
 }
 
-impl<I: VectorSpace, T: LayerOperationFor<I, R, W>, R: LayerResultContextFor<I>, W: LayerWeights>
-    LayerOperationFor<I, R, W> for FractalLayers<T>
+impl<
+    I: VectorSpace,
+    T: for<'a> LayerOperationFor<I, FractalLayeredResult<'a, R>, W>,
+    R: LayerResult,
+    W: LayerWeights,
+> LayerOperationFor<I, R, W> for FractalLayers<T>
 {
     #[inline]
     fn do_noise_op(
         &self,
         seeds: &mut NoiseRng,
         working_loc: &mut I,
-        result: &mut R::Result,
+        result: &mut R,
         weights: &mut W,
     ) {
-        self.layer.do_noise_op(seeds, working_loc, result, weights);
+        let mut result = FractalLayeredResult {
+            result,
+            artificial_frequency: 1.0,
+        };
+        self.layer
+            .do_noise_op(seeds, working_loc, &mut result, weights);
         for _ in 1..self.amount {
             *working_loc = *working_loc * self.lacunarity;
-            self.layer.do_noise_op(seeds, working_loc, result, weights);
+            result.artificial_frequency *= self.lacunarity;
+            self.layer
+                .do_noise_op(seeds, working_loc, &mut result, weights);
         }
+    }
+}
+
+/// Represents a [`LayerResultFor<T>`] that can operate in a fractal context.
+/// This is used by [`FractalLayeredResult`] to enforce the chain rule.
+pub trait FractalLayerResultCompatible<T>: LayerResultFor<T> {
+    /// Same as [`LayerResultFor::include_value`] but also includes how much the layer has been artificially scaled by.
+    fn include_fractal_value(&mut self, value: T, weight: f32, artificial_frequency: f32);
+}
+
+/// A result used in [`FractalLayers`] to wrap an inner result type.
+/// This keeps gradients accurate via the chain rule.
+pub struct FractalLayeredResult<'a, R> {
+    result: &'a mut R,
+    artificial_frequency: f32,
+}
+
+impl<'a, R: LayerResult> LayerResult for FractalLayeredResult<'a, R> {
+    type Output = &'a mut R;
+
+    #[inline]
+    fn add_unexpected_weight_to_total(&mut self, weight: f32) {
+        self.result.add_unexpected_weight_to_total(weight);
+    }
+
+    #[inline]
+    fn finish(self, _rng: &mut NoiseRng) -> Self::Output {
+        self.result
+    }
+}
+
+impl<'a, T, R: FractalLayerResultCompatible<T>> LayerResultFor<T> for FractalLayeredResult<'a, R> {
+    #[inline]
+    fn include_value(&mut self, value: T, weight: f32) {
+        self.result
+            .include_fractal_value(value, weight, self.artificial_frequency);
     }
 }
 
@@ -573,7 +617,7 @@ impl LayerWeightsSettings for Persistence {
 /// This is a good default for most noise functions.
 /// This is a building block for traditional fractal brownian motion. See also [`FractalLayers`].
 ///
-/// `T` is the [`VectorSpace`] you want to collect.
+/// `T` is the type you want to collect, usually a [`VectorSpace`].
 /// If what you want to collect is more advanced than a single vector space, consider making your own [`LayerResultContext`].
 /// If you want to use derivatives to approximate erosion, etc, see [`NormedByDerivative`].
 #[derive(Clone, Copy, PartialEq)]
@@ -650,10 +694,41 @@ where
     }
 }
 
+impl<T: VectorSpace, I: Into<T>> FractalLayerResultCompatible<I> for NormedResult<T>
+where
+    Self: LayerResultFor<I>,
+{
+    #[inline]
+    fn include_fractal_value(&mut self, value: I, weight: f32, _artificial_frequency: f32) {
+        self.running_total = self.running_total + value.into() * weight;
+    }
+}
+
+impl<
+    T: AddAssign + Mul<f32, Output = T>,
+    G: AddAssign + Mul<f32, Output = G>,
+    IT: Into<T>,
+    IG: Into<G>,
+> FractalLayerResultCompatible<WithGradient<IT, IG>> for NormedResult<WithGradient<T, G>>
+where
+    Self: LayerResultFor<WithGradient<IT, IG>>,
+{
+    #[inline]
+    fn include_fractal_value(
+        &mut self,
+        value: WithGradient<IT, IG>,
+        weight: f32,
+        artificial_frequency: f32,
+    ) {
+        self.running_total.value += value.value.into() * weight;
+        self.running_total.gradient += value.gradient.into() * weight * artificial_frequency;
+    }
+}
+
 /// A [`LayerResultContext`] that will normalize the results into a weighted average where the derivatives affect the weight.
 /// See also [`Normed`].
 ///
-/// `T` is the [`VectorSpace`] you want to collect.
+/// `T` is the type you want to collect, usually a [`VectorSpace`].
 /// `L` is the [`LengthFunction`] to calculate the derivative from the gradient.
 /// `C` is the [`Curve`] that determines how much a derivative's value should contribute to the result.
 ///
@@ -670,6 +745,9 @@ where
 ///     FractalLayers<Octave<common_noise::Perlin>>,
 /// >>::default();
 /// ```
+///
+/// Note that if you ask to collect a [`WithGradient`], the gradient collected may not be exact.
+/// It is usable, but is not mathematically rigorous.
 #[derive(Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "bevy_reflect", derive(bevy_reflect::Reflect))]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize))]
@@ -762,22 +840,34 @@ impl<T: Div<f32>, G, L, C> LayerResult for NormedByDerivativeResult<T, G, L, C> 
     }
 }
 
-impl<
-    T: AddAssign + Mul<f32, Output = T>,
-    I,
-    IG: Into<G> + Copy,
-    G: VectorSpace,
-    L: LengthFunction<G>,
-    C: Curve<f32>,
-> LayerResultFor<WithGradient<I, IG>> for NormedByDerivativeResult<T, G, L, C>
+impl<I, T, G, L, C> LayerResultFor<I> for NormedByDerivativeResult<T, G, L, C>
 where
-    Self: LayerResult,
-    WithGradient<I, IG>: Into<T>,
+    Self: FractalLayerResultCompatible<I> + LayerResult,
 {
     #[inline]
-    fn include_value(&mut self, value: WithGradient<I, IG>, weight: f32) {
-        let gradient = value.gradient.into();
-        self.running_derivative = self.running_derivative + gradient * weight;
+    fn include_value(&mut self, value: I, weight: f32) {
+        self.include_fractal_value(value, weight, 1.0);
+    }
+}
+
+impl<
+    T: VectorSpace + AddAssign + Mul<f32, Output = T>,
+    I: Into<T>,
+    IG: Into<G> + Copy,
+    G: VectorSpace + AddAssign + Mul<f32, Output = G>,
+    L: LengthFunction<G>,
+    C: Curve<f32>,
+> FractalLayerResultCompatible<WithGradient<I, IG>> for NormedByDerivativeResult<T, G, L, C>
+{
+    #[inline]
+    fn include_fractal_value(
+        &mut self,
+        value: WithGradient<I, IG>,
+        weight: f32,
+        artificial_frequency: f32,
+    ) {
+        let gradient: G = value.gradient.into() * artificial_frequency * weight;
+        let value = value.value.into() * weight;
 
         let total_derivative = self
             .derivative_calculator
@@ -785,9 +875,46 @@ where
         let additional_weight = self
             .derivative_contribution
             .sample_unchecked(total_derivative * self.derivative_falloff);
+        self.running_derivative += gradient;
 
-        let full_weight = weight * additional_weight;
-        self.running_total += value.into() * full_weight;
+        self.running_total += value * additional_weight;
+    }
+}
+
+impl<
+    IT: Into<f32>,
+    IG: Into<G> + Copy,
+    G: VectorSpace + AddAssign + Mul<G, Output = G>,
+    L: DifferentiableLengthFunction<G>,
+    C: SampleDerivative<f32>,
+> FractalLayerResultCompatible<WithGradient<IT, IG>>
+    for NormedByDerivativeResult<WithGradient<f32, G>, G, L, C>
+{
+    #[inline]
+    fn include_fractal_value(
+        &mut self,
+        value: WithGradient<IT, IG>,
+        weight: f32,
+        artificial_frequency: f32,
+    ) {
+        let gradient: G = value.gradient.into() * artificial_frequency * weight;
+        let value = value.value.into() * weight;
+
+        let total_derivative = self
+            .derivative_calculator
+            .length_and_gradient_of(self.running_derivative);
+        let additional_weight = self
+            .derivative_contribution
+            .sample_with_derivative_unchecked(total_derivative.value * self.derivative_falloff);
+        self.running_derivative += gradient;
+        let d_additional_weight = total_derivative.gradient
+            * gradient
+            * additional_weight.derivative
+            * self.derivative_falloff;
+
+        self.running_total.value += value * additional_weight.value;
+        self.running_total.gradient +=
+            gradient * additional_weight.value + d_additional_weight * value;
     }
 }
 
@@ -814,6 +941,16 @@ impl Curve<f32> for PeakDerivativeContribution {
     }
 }
 
+impl SampleDerivative<f32> for PeakDerivativeContribution {
+    #[inline]
+    fn sample_with_derivative_unchecked(&self, t: f32) -> WithDerivative<f32> {
+        WithDerivative {
+            value: 1.0 / (1.0 + t),
+            derivative: -1.0 / ((1.0 + t) * (1.0 + t)),
+        }
+    }
+}
+
 /// A [`Curve`] designed for [`NormedByDerivative`] that decreases from 1 to 0 for positive values.
 /// This produces more rounded high values but is significantly slower than [`PeakDerivativeContribution`].
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -832,5 +969,15 @@ impl Curve<f32> for SmoothDerivativeContribution {
     #[inline]
     fn sample_unchecked(&self, t: f32) -> f32 {
         (-t).exp()
+    }
+}
+
+impl SampleDerivative<f32> for SmoothDerivativeContribution {
+    #[inline]
+    fn sample_with_derivative_unchecked(&self, t: f32) -> WithDerivative<f32> {
+        WithDerivative {
+            value: (-t).exp(),
+            derivative: (-t).exp() * -1.0,
+        }
     }
 }

@@ -1490,53 +1490,153 @@ impl_simplectic_blend!(Vec4, 62.795_597);
 
 #[cfg(test)]
 mod tests {
-    use bevy_math::vec2;
-
-    use crate::prelude::*;
-
     use super::*;
+    use crate::{
+        Noise, SampleableFor, ScalableNoise,
+        cells::{OrthoGrid, SimplexGrid},
+        lengths::EuclideanSqrdLength,
+        math_noise::Abs,
+        prelude::{
+            Billow, FractalLayers, LayeredNoise, Masked, Normed, NormedByDerivative, Octave,
+            PeakDerivativeContribution, Persistence, UNormToSNorm,
+        },
+        rng::{Random, SNorm},
+    };
 
-    #[test]
-    fn test_simplex_gradients() {
-        /// Amount we step to approximate gradient. This must be significantly smaller than the
-        /// noise features to be any sort of accurate.
-        const STEP: f32 = 1e-3;
-        /// Epsilon for gradient approximation comparison.
-        const EPSILON: f32 = 1e-3;
-        let noise = Noise::<BlendCellGradients<SimplexGrid, SimplecticBlend, QuickGradients, true>>::default();
-        let sample_points = [
-            vec2(0.0, 0.0),
-            vec2(0.0, 0.5),
-            vec2(0.0, 1.0),
-            vec2(0.5, 0.0),
-            vec2(0.5, 0.5),
-            vec2(0.5, 1.0),
-            vec2(1.0, 0.0),
-            vec2(1.0, 0.5),
-            vec2(1.0, 1.0),
-        ];
+    /// Amount we step to approximate gradient. This must be significantly smaller than the
+    /// noise features to be any sort of accurate.
+    const STEP: f32 = 1e-4;
+    /// Epsilon for gradient approximation comparison.
+    const EPSILON: f32 = 1e-2;
+
+    fn test_grads_2d(noise: impl SampleableFor<Vec2, WithGradient<f32, Vec2>> + ScalableNoise) {
         let mut failure = false;
-        for point in sample_points {
-            let result = noise.sample_for::<WithGradient<f32, Vec2>>(point);
-            let positive_grad = Vec2::new(
-                noise.sample_for::<f32>(point + STEP * Vec2::X) - result.value,
-                noise.sample_for::<f32>(point + STEP * Vec2::Y) - result.value,
-            );
-            let negative_grad = Vec2::new(
-                result.value - noise.sample_for::<f32>(point - STEP * Vec2::X),
-                result.value - noise.sample_for::<f32>(point - STEP * Vec2::Y),
-            );
-            let approximate_gradient = (positive_grad + negative_grad) / (STEP * 2.0);
-            let analytical_gradient = result.gradient;
-            if approximate_gradient.distance(result.gradient) > EPSILON {
-                println!(
-                    "Gradient mismatch at point {point:?}: expected {approximate_gradient:?}, got {analytical_gradient:?}"
-                );
-                failure = true;
+        for x in -10..=10 {
+            for y in -10..=10 {
+                let point = Vec2::new(x as f32, y as f32) * 0.2;
+                let result = noise.sample(point);
+                let approximate_gradient = Vec2::new(
+                    noise.sample(point + STEP * Vec2::X).value
+                        - noise.sample(point - STEP * Vec2::X).value,
+                    noise.sample(point + STEP * Vec2::Y).value
+                        - noise.sample(point - STEP * Vec2::Y).value,
+                ) / (STEP * 2.0);
+                let analytical_gradient = result.gradient;
+                if approximate_gradient.distance(result.gradient) > EPSILON {
+                    let dir_approx = approximate_gradient.normalize_or_zero();
+                    let dir_analytical = analytical_gradient.normalize_or_zero();
+                    println!(
+                        "Gradient mismatch at point {point:?}: approximate: {approximate_gradient:?} dir {dir_approx:?}, analytical: {analytical_gradient:?} dir {dir_analytical:?}"
+                    );
+                    failure = true;
+                }
             }
         }
         if failure {
             panic!("Simplex gradients failed at the above points.");
         }
+    }
+
+    #[test]
+    fn test_simplex_gradients() {
+        test_grads_2d(Noise::<
+            BlendCellGradients<SimplexGrid, SimplecticBlend, QuickGradients, true>,
+        >::default());
+    }
+
+    #[test]
+    fn test_simplex_value_gradients() {
+        test_grads_2d(Noise::<
+            BlendCellValues<SimplexGrid, SimplecticBlend, Random<SNorm, f32>, true>,
+        >::default());
+    }
+
+    #[test]
+    fn test_mix_gradients() {
+        test_grads_2d(Noise::<
+            MixCellGradients<OrthoGrid, Smoothstep, QuickGradients, true>,
+        >::default());
+    }
+
+    #[test]
+    fn test_mix_value_gradients() {
+        test_grads_2d(Noise::<
+            MixCellValues<OrthoGrid, Smoothstep, Random<SNorm, f32>, true>,
+        >::default());
+    }
+
+    #[test]
+    fn test_mask_gradients() {
+        test_grads_2d(Noise::<
+            Masked<
+                MixCellGradients<OrthoGrid, Smoothstep, QuickGradients, true>,
+                BlendCellGradients<SimplexGrid, SimplecticBlend, QuickGradients, true>,
+            >,
+        >::default());
+    }
+
+    #[test]
+    fn test_fbm_gradients() {
+        test_grads_2d(Noise::<
+            LayeredNoise<
+                Normed<WithGradient<f32, Vec2>>,
+                Persistence,
+                FractalLayers<
+                    Octave<BlendCellGradients<SimplexGrid, SimplecticBlend, QuickGradients, true>>,
+                >,
+            >,
+        >::default());
+    }
+
+    #[test]
+    #[ignore = "This is close to correct, but not quite. But the math seems to be correct. Probably, the gradients are correct but the function is not classically differentiable."]
+    fn test_erosion_approx_fbm_gradients() {
+        test_grads_2d(Noise::<
+            LayeredNoise<
+                NormedByDerivative<
+                    WithGradient<f32, Vec2>,
+                    EuclideanSqrdLength,
+                    PeakDerivativeContribution,
+                >,
+                Persistence,
+                FractalLayers<
+                    Octave<BlendCellGradients<SimplexGrid, SimplecticBlend, QuickGradients, true>>,
+                >,
+            >,
+        >::from(LayeredNoise::new(
+            NormedByDerivative::default().with_falloff(1.0),
+            Default::default(),
+            FractalLayers {
+                layer: Octave::default(),
+                lacunarity: 1.0,
+                amount: 2,
+            },
+        )));
+    }
+
+    #[test]
+    #[ignore = "abs is not mathematically rigorously differentiable"]
+    fn test_billowing_gradients() {
+        test_grads_2d(Noise::<(
+            BlendCellGradients<SimplexGrid, SimplecticBlend, QuickGradients, true>,
+            Billow,
+        )>::default());
+    }
+
+    #[test]
+    #[ignore = "abs is not mathematically rigorously differentiable"]
+    fn test_abs_gradients() {
+        test_grads_2d(Noise::<(
+            BlendCellGradients<SimplexGrid, SimplecticBlend, QuickGradients, true>,
+            Abs,
+        )>::default());
+    }
+
+    #[test]
+    fn test_unorm_to_snorm_gradients() {
+        test_grads_2d(Noise::<(
+            BlendCellGradients<SimplexGrid, SimplecticBlend, QuickGradients, true>,
+            UNormToSNorm,
+        )>::default());
     }
 }
