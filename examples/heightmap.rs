@@ -7,7 +7,7 @@ use bevy::{
     render::mesh::{Indices, Mesh},
 };
 use bevy_math::Vec2;
-use noiz::{math_noise::Pow2, misc_noise::Constant, prelude::*};
+use noiz::{math_noise::Pow2, prelude::*};
 
 // Feel free to play around with this and the example noise!
 const SEED: u32 = 0;
@@ -15,7 +15,7 @@ const EXTENT: f32 = 512.0;
 const RESOLUTION: f32 = 2.0;
 
 const PERIOD: f32 = 512.0;
-const AMPLITUDE: f32 = 128.0;
+const AMPLITUDE: f32 = 256.0;
 
 const SPEED: f32 = 50.0;
 const SENSITIVITY: f32 = 0.01;
@@ -42,15 +42,16 @@ fn heightmap_noise() -> impl SampleableFor<Vec2, f32> + ScalableNoise + Seedable
                 MixCellGradients::<OrthoGrid, Smoothstep, QuickGradients>::default(),
                 SNormToUNorm,
                 Pow2,
-                Offset {
-                    offseter: Constant(0.75),
-                    offset_strength: 1.0,
-                },
+                RemapCurve::<Lerped<f32>, f32, false>::from(Lerped {
+                    start: 0.5f32,
+                    end: 1.0,
+                }),
             ),
         ),
         ..default()
     }
-    // Here's another one you can try: (Might want to increase the AMPLITUDE for this one.)
+
+    // Here's another one you can try:
     // Noise {
     //     noise: LayeredNoise::new(
     //         NormedByDerivative::<f32, EuclideanLength, PeakDerivativeContribution>::default()
