@@ -104,7 +104,33 @@ pub type Billow = (Abs, UNormToSNorm);
 pub struct Wrapped(pub f32);
 
 macro_rules! impl_vector_spaces {
-    ($n:ty) => {
+    (scalar $n:ty) => {
+        impl_vector_spaces!(both $n);
+    };
+
+    (vec $n:ty) => {
+        impl_vector_spaces!(both $n);
+
+        impl NoiseFunction<$n> for Abs {
+            type Output = $n;
+
+            #[inline]
+            fn evaluate(&self, input: $n, _seeds: &mut crate::rng::NoiseRng) -> Self::Output {
+                input.abs()
+            }
+        }
+
+        impl NoiseFunction<$n> for PowF {
+            type Output = $n;
+
+            #[inline]
+            fn evaluate(&self, input: $n, _seeds: &mut crate::rng::NoiseRng) -> Self::Output {
+                input.powf(self.0)
+            }
+        }
+    };
+
+    (both $n:ty) => {
         impl NoiseFunction<$n> for SNormToUNorm {
             type Output = $n;
 
@@ -150,30 +176,12 @@ macro_rules! impl_vector_spaces {
             }
         }
 
-        impl NoiseFunction<$n> for PowF {
-            type Output = $n;
-
-            #[inline]
-            fn evaluate(&self, input: $n, _seeds: &mut crate::rng::NoiseRng) -> Self::Output {
-                input.powf(self.0)
-            }
-        }
-
         impl NoiseFunction<$n> for PositiveApproachZero {
             type Output = $n;
 
             #[inline]
             fn evaluate(&self, input: $n, _seeds: &mut crate::rng::NoiseRng) -> Self::Output {
                 1.0 / (input + 1.0)
-            }
-        }
-
-        impl NoiseFunction<$n> for Abs {
-            type Output = $n;
-
-            #[inline]
-            fn evaluate(&self, input: $n, _seeds: &mut crate::rng::NoiseRng) -> Self::Output {
-                input.abs()
             }
         }
 
@@ -215,11 +223,29 @@ macro_rules! impl_vector_spaces {
     };
 }
 
-impl_vector_spaces!(f32);
-impl_vector_spaces!(Vec2);
-impl_vector_spaces!(Vec3);
-impl_vector_spaces!(Vec3A);
-impl_vector_spaces!(Vec4);
+impl NoiseFunction<f32> for Abs {
+    type Output = f32;
+
+    #[inline]
+    fn evaluate(&self, input: f32, _seeds: &mut crate::rng::NoiseRng) -> Self::Output {
+        bevy_math::ops::abs(input)
+    }
+}
+
+impl NoiseFunction<f32> for PowF {
+    type Output = f32;
+
+    #[inline]
+    fn evaluate(&self, input: f32, _seeds: &mut crate::rng::NoiseRng) -> Self::Output {
+        bevy_math::ops::powf(input, self.0)
+    }
+}
+
+impl_vector_spaces!(scalar f32);
+impl_vector_spaces!(vec Vec2);
+impl_vector_spaces!(vec Vec3);
+impl_vector_spaces!(vec Vec3A);
+impl_vector_spaces!(vec Vec4);
 
 /// A [`NoiseFunction`] produces a ping ponging effect for UNorm values.
 /// The inner value represents the strength of the ping pong.
@@ -490,8 +516,8 @@ impl<G: Mul<f32, Output = G>> NoiseFunction<WithGradient<f32, G>> for PowF {
         _seeds: &mut crate::rng::NoiseRng,
     ) -> Self::Output {
         WithGradient {
-            value: input.value.powf(self.0),
-            gradient: input.gradient * (self.0 * input.value.powf(self.0 - 1.0)),
+            value: bevy_math::ops::powf(input.value, self.0),
+            gradient: input.gradient * (self.0 * bevy_math::ops::powf(input.value, self.0 - 1.0)),
         }
     }
 }
