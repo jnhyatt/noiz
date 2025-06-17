@@ -1,4 +1,4 @@
-# Release 0.2
+# V 0.2
 
 This is a small release, mostly focusing on rounding some rough edges from 0.1.
 If there are any issues you run across, please don't hesitate to open an issue!
